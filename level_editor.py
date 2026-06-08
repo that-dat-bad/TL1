@@ -1,4 +1,37 @@
+# -*- coding: utf-8 -*-
 import bpy  # type: ignore
+import sys
+import io
+import os
+import math
+# Blenderのコンソール出力をUTF-8に設定（Windows文字化け対策）
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        # Windowsコンソールの出力コードページをUTF-8(65001)に変更
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+# stdout/stderrのエンコーディングをUTF-8に再設定
+try:
+    if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    elif sys.stdout and hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+except Exception:
+    pass
+try:
+    if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+    elif sys.stderr and hasattr(sys.stderr, 'buffer'):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 #ブレンダーに登録するアドオン情報
 bl_info = {
     "name": "レベルエディタ",
@@ -89,7 +122,26 @@ class MYADDON_OT_export_scene(bpy.types.Operator):
     def execute(self, context):
         print("シーン情報をexportします")
 
-        print(bpy.context.scene.objects)
+        #シーン内の全オブジェクトについて
+        for object in bpy.context.scene.objects:
+            print(object.type + " - " + object.name)
+            #ローカルトランスフォーム行列から平行移動、回転、スケーリングを抽出
+            #型は Vector, Quaternion, Vector
+            trans, rot, scale = object.matrix_local.decompose()
+            #回転を Quaternion から Euler（3軸での回転角）に変換
+            rot = rot.to_euler()
+            #ラジアンから度数法に変換
+            rot.x = math.degrees(rot.x)
+            rot.y = math.degrees(rot.y)
+            rot.z = math.degrees(rot.z)
+            #トランスフォーム情報を表示
+            print("Trans(%f,%f,%f)" % (trans.x, trans.y, trans.z) )
+            print("Rot(%f,%f,%f)" % (rot.x, rot.y, rot.z) )
+            print("Scale(%f,%f,%f)" % (scale.x, scale.y, scale.z) )
+            #親オブジェクトの名前を表示
+            if object.parent:
+                print("Parent:" + object.parent.name)
+            print()
 
         print("シーン情報をexportしました")
         self.report({'INFO'}, "シーン情報をexportしました")
