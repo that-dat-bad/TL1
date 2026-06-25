@@ -5,6 +5,8 @@ import sys
 import io
 import os
 import math
+import gpu
+import gpu_extras.batch
 
 # Blenderのコンソール出力をUTF-8に設定（Windows文字化け対策）
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -126,10 +128,14 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
         rot.y = math.degrees(rot.y)
         rot.z = math.degrees(rot.z)
         
-        # トランスフォーム情報を表示
-        self.write_and_print(file, indent + "Trans(%f,%f,%f)" % (trans.x, trans.y, trans.z))
-        self.write_and_print(file, indent + "Rot(%f,%f,%f)" % (rot.x, rot.y, rot.z))
-        self.write_and_print(file, indent + "Scale(%f,%f,%f)" % (scale.x, scale.y, scale.z))
+        #トランスフォーム情報を表示
+        self.write_and_print(file, indent + "T %f %f %f" % (trans.x, trans.y, trans.z) )
+        self.write_and_print(file, indent + "R %f %f %f" % (rot.x, rot.y, rot.z) )
+        self.write_and_print(file, indent + "S %f %f %f" % (scale.x, scale.y, scale.z) )
+        #カスタムプロパティ 'file_name'
+        if "file_name" in object:
+            self.write_and_print(file, indent + "N %s" % object["file_name"])
+        self.write_and_print(file, indent + 'END')
         self.write_and_print(file, '')
 
         # 子ノードへ進む（深さが1上がる）
@@ -139,6 +145,11 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
     def export(self):
         """ファイル出力"""
         print("シーン情報をファイルに出力...%r" % self.filepath)
+
+        # 保存先ディレクトリが存在しない場合は作成する
+        dirname = os.path.dirname(self.filepath)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
 
         # ファイルをテキスト形式で開く
         with open(self.filepath, 'w', encoding='utf-8') as file:
@@ -160,6 +171,65 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
         file.write("\n")
 
 
+class OBJECT_PT_file_name(bpy.types.Panel):
+    """オブジェクトのファイルネームパネル"""
+    bl_idname = "OBJECT_PT_file_name"
+    bl_label = "FileName"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "object"
+
+    #サブメニューの描画
+    def draw(self, context):
+
+        # パネルに項目を追加
+        if "file_name" in context.object:
+            #すでにプロパティがあれば、プロパティを表示
+            self.layout.prop(context.object,'["file_name"]',text=self.bl_label)
+        else:
+            #プロパティがなければ、プロパティ追加ボタンを表示
+            self.layout.operator(MYADDON_OT_add_filename.bl_idname)
+
+
+class MYADDON_OT_add_filename(bpy.types.Operator):
+    bl_idname="myaddon.myaddon_ot_add_filename"
+    bl_label="FileName 追加"
+    bl_description ="['file_name']カスタムプロパティを追加します"
+    bl_options={"REGISTER","UNDO"}
+
+    def execute(self,context):
+
+        #['file_name']カスタムプロパティを追加
+        context.object["file_name"]=""
+
+        return{"FINISHED"}
+
+
+#コライダー描画
+class DrawCollider:
+    #描画ハンドル
+    handle =None
+
+    #3Dビューに登録する描画関数
+    def draw_collider():
+        #頂点データ
+        vertices ={"pos":[[0,0,0],[2,2,2]]}
+        
+        #インデックスデータ
+        indices =[[0,1]]
+
+        #ビルトインのシェーダーを取得
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+
+        #バッチを作成
+        batch = gpu_extras.batch.batch_for_shader(shader, "LINES", vertices, indices=indices)
+
+        #描画
+        shader.bind()
+        shader.uniform_float("color", (0.5, 1.0, 1.0, 1.0)) 
+        batch.draw(shader)
+
+
 # メニュー項目描画
 def draw_menu_manual(self, context):
     self.layout.operator("wm.url_open_preset", text="Manual", icon='HELP')
@@ -170,7 +240,9 @@ classes = [
     TOPBAR_MT_my_menu,
     MYADDON_OT_strech_vertex,
     MYADDON_OT_create_ico_sphere,
-    MYADDON_OT_export_scene
+    MYADDON_OT_export_scene,
+    MYADDON_OT_add_filename,
+    OBJECT_PT_file_name
 ]
 
 
@@ -178,13 +250,22 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    #メニューに項目を追加
     bpy.types.TOPBAR_MT_editor_menus.append(TOPBAR_MT_my_menu.submenu)
+    
+    #描画ハンドルの登録
+    DrawCollider.handle = bpy.types.SpaceView3D.draw_handler_add(DrawCollider.draw_collider, (), 'WINDOW', 'POST_VIEW')
+    
     print("レベルエディタが有効化されました。")
 
 
 # Add-On無効化時コールバック
 def unregister():
     bpy.types.TOPBAR_MT_editor_menus.remove(TOPBAR_MT_my_menu.submenu)
+    #描画ハンドルの解除
+    if DrawCollider.handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(DrawCollider.handle, 'WINDOW')
+    #blenderからクラスを削除
     for cls in classes:
         bpy.utils.unregister_class(cls)
     print("レベルエディタが無効化されました。")
