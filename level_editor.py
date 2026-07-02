@@ -64,6 +64,8 @@ class TOPBAR_MT_my_menu(bpy.types.Menu):
         self.layout.separator()
         self.layout.operator(MYADDON_OT_create_ico_sphere.bl_idname, text=MYADDON_OT_create_ico_sphere.bl_label)
         self.layout.separator()
+        self.layout.operator(MYADDON_OT_create_road_along_spline.bl_idname, text=MYADDON_OT_create_road_along_spline.bl_label)
+        self.layout.separator()
         self.layout.operator(MYADDON_OT_export_scene.bl_idname, text=MYADDON_OT_export_scene.bl_label)
 
     def submenu(self, context):
@@ -93,6 +95,83 @@ class MYADDON_OT_create_ico_sphere(bpy.types.Operator):
     def execute(self, context):
         bpy.ops.mesh.primitive_ico_sphere_add()
         print("ICO球を生成しました。")
+        return {'FINISHED'}
+
+
+# オペレータ スプライン道路生成
+class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
+    bl_idname = "myaddon.myaddon_ot_create_road_along_spline"
+    bl_label = "スプライン道路生成"
+    bl_description = "スプライン曲線に沿って道路メッシュを生成します"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    road_width: bpy.props.FloatProperty(
+        name="道路の幅",
+        description="道路メッシュの横幅を指定します",
+        default=2.0,
+        min=0.1,
+    )
+
+    def execute(self, context):
+        # 1. 曲線の作成
+        bpy.ops.curve.primitive_bezier_curve_add(enter_editmode=False, align='WORLD', location=(0, 0, 0), scale=(1, 1, 1))
+        curve_obj = context.active_object
+        curve_obj.name = "RoadPath"
+        
+        # 道路がねじれたり反転したりするのを防ぐため、Twist Modeを Z-Up に固定
+        curve_obj.data.twist_mode = 'Z_UP'
+        
+        # メッシュが曲線の端からはみ出すのを防ぐため、伸縮（Stretch）と境界クランプ（Bounds Clamp）を有効化
+        curve_obj.data.use_stretch = True
+        curve_obj.data.use_deform_bounds = True
+        
+        # 曲線の原点を始点にぴったり合わせる（X=0から開始）
+        spline = curve_obj.data.splines[0]
+        spline.bezier_points[0].co = (0.0, 0.0, 0.0)
+        spline.bezier_points[0].handle_left = (-1.0, 0.0, 0.0)
+        spline.bezier_points[0].handle_right = (1.0, 0.0, 0.0)
+        spline.bezier_points[1].co = (4.0, 0.0, 0.0)
+        spline.bezier_points[1].handle_left = (3.0, 0.0, 0.0)
+        spline.bezier_points[1].handle_right = (5.0, 0.0, 0.0)
+        
+        # 2. 道路メッシュ(Plane)の作成
+        bpy.ops.mesh.primitive_plane_add(size=2.0, enter_editmode=False, align='WORLD', location=(0, 0, 0))
+        mesh_obj = context.active_object
+        mesh_obj.name = "RoadMesh"
+        
+        # メッシュの原点を端（X=0）に合わせるため、頂点自体をズラす
+        for v in mesh_obj.data.vertices:
+            v.co.x += 1.0 # -1.0~1.0 を 0.0~2.0 に移動
+        
+        # X軸方向に伸ばすため、Planeのスケールを調整
+        mesh_obj.scale[0] = 0.5 # 長さ (進行方向: 1.0になる)
+        mesh_obj.scale[1] = self.road_width / 2.0 # 幅
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+        # ※注意: ここでCurveを親にすると、Objectモードで回転・拡大した際にCurveモディファイアが二重にかかる
+        # (Double Transform) 問題が発生してメッシュが飛んでいくため、親子付けは行いません。
+
+        # 3. Arrayモディファイアの追加
+        array_mod = mesh_obj.modifiers.new(name="Array", type='ARRAY')
+        array_mod.fit_type = 'FIT_CURVE'
+        array_mod.curve = curve_obj
+        array_mod.use_relative_offset = True
+        array_mod.relative_offset_displace[0] = 1.0
+        # 道路の継ぎ目を滑らかにつなぐ（マージ）
+        array_mod.use_merge_vertices = True
+        # 編集モードでもモディファイアの結果を表示・編集ケージに適用
+        array_mod.show_in_editmode = True
+        array_mod.show_on_cage = True
+        
+        # 4. Curveモディファイアの追加
+        curve_mod = mesh_obj.modifiers.new(name="Curve", type='CURVE')
+        curve_mod.object = curve_obj
+        curve_mod.deform_axis = 'POS_X'
+        # 編集モードでもモディファイアの結果を表示・編集ケージに適用
+        curve_mod.show_in_editmode = True
+        curve_mod.show_on_cage = True
+
+        print("スプライン道路を生成しました。")
         return {'FINISHED'}
 
 
@@ -288,6 +367,7 @@ classes = [
     TOPBAR_MT_my_menu,
     MYADDON_OT_strech_vertex,
     MYADDON_OT_create_ico_sphere,
+    MYADDON_OT_create_road_along_spline,
     MYADDON_OT_export_scene,
     MYADDON_OT_add_filename,
     OBJECT_PT_file_name
