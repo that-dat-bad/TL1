@@ -7,6 +7,7 @@ import os
 import math
 import gpu
 import gpu_extras.batch
+import copy
 
 # Blenderのコンソール出力をUTF-8に設定（Windows文字化け対策）
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -213,15 +214,62 @@ class DrawCollider:
     #3Dビューに登録する描画関数
     def draw_collider():
         #頂点データ
-        vertices ={"pos":[[0,0,0],[2,2,2]]}
+        vertices ={"pos":[]}
         
         #インデックスデータ
-        indices =[[0,1]]
+        indices =[]
+
+        #各頂点の、オブジェクト中心からのオフセット
+        offsets =[
+            [-0.5,-0.5,-0.5], #左下前
+            [+0.5,-0.5,-0.5], #右下前
+            [+0.5,+0.5,-0.5], #右上手前
+            [-0.5,+0.5,-0.5], #左上手前
+            [-0.5,-0.5,+0.5], #左下奥
+            [+0.5,-0.5,+0.5], #右下奥
+            [+0.5,+0.5,+0.5], #右上奥
+            [-0.5,+0.5,+0.5], #左上手前
+        ]
+
+        #現在シーンのオブジェクトリストを走査
+        for obj in bpy.context.scene.objects:
+            #追加前の頂点数
+            start = len(vertices['pos'])
+
+            #Boxの8頂点分回す
+            for offset in offsets:
+                #オブジェクトの中心座標とスケールをコピー
+                pos = [obj.location[0], obj.location[1], obj.location[2]]
+                size = [obj.scale[0], obj.scale[1], obj.scale[2]]
+
+                # オフセットを適用
+                pos[0]+=offset[0]*size[0]
+                pos[1]+=offset[1]*size[1]
+                pos[2]+=offset[2]*size[2]
+                
+                #頂点データリストに座標を追加
+                vertices['pos'].append(pos)
+                
+            #前面を構成する辺の頂点インデックス
+            indices.append([start+0, start+1]) #下
+            indices.append([start+2, start+3]) #上
+            indices.append([start+0, start+3]) #左
+            indices.append([start+1, start+2]) #右
+            #奥面を構成する辺の頂点インデックス
+            indices.append([start+4, start+5]) #下
+            indices.append([start+6, start+7]) #上
+            indices.append([start+4, start+7]) #左
+            indices.append([start+5, start+6]) #右
+            #手前と奥を繋ぐ辺の頂点インデックス
+            indices.append([start+0, start+4])
+            indices.append([start+1, start+5])
+            indices.append([start+2, start+6])
+            indices.append([start+3, start+7])
 
         #ビルトインのシェーダーを取得
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
 
-        #バッチを作成
+        #バッチを作成 (必ず頂点・インデックスを追加し終わってから作成する)
         batch = gpu_extras.batch.batch_for_shader(shader, "LINES", vertices, indices=indices)
 
         #描画
