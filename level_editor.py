@@ -118,63 +118,112 @@ class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
     )
 
     def execute(self, context):
-        # 1. 曲線の作成
-        bpy.ops.curve.primitive_bezier_curve_add(enter_editmode=False, align='WORLD', location=(0, 0, 0), scale=(1, 1, 1))
-        curve_obj = context.active_object
-        curve_obj.name = "RoadPath"
+        # 1. POLY曲線の作成（Fillet CurveのPOLYモードと相性が良く、Alt+Sも確実に動作する）
+        curve_data = bpy.data.curves.new("RoadPath", 'CURVE')
+        curve_data.dimensions = '3D'
         
         # 道路がねじれたり反転したりするのを防ぐため、Twist Modeを Z-Up に固定
-        curve_obj.data.twist_mode = 'Z_UP'
-        
-        # メッシュが曲線の端からはみ出すのを防ぐため、伸縮（Stretch）と境界クランプ（Bounds Clamp）を有効化
-        curve_obj.data.use_stretch = True
-        curve_obj.data.use_deform_bounds = True
-        
-        # 曲線の原点を始点にぴったり合わせる（X=0から開始）
-        spline = curve_obj.data.splines[0]
-        spline.bezier_points[0].co = (0.0, 0.0, 0.0)
-        spline.bezier_points[0].handle_left = (-1.0, 0.0, 0.0)
-        spline.bezier_points[0].handle_right = (1.0, 0.0, 0.0)
-        spline.bezier_points[1].co = (4.0, 0.0, 0.0)
-        spline.bezier_points[1].handle_left = (3.0, 0.0, 0.0)
-        spline.bezier_points[1].handle_right = (5.0, 0.0, 0.0)
-        
-        # 2. 道路メッシュ(Plane)の作成
-        bpy.ops.mesh.primitive_plane_add(size=2.0, enter_editmode=False, align='WORLD', location=(0, 0, 0))
-        mesh_obj = context.active_object
-        mesh_obj.name = "RoadMesh"
-        
-        # メッシュの原点を端（X=0）に合わせるため、頂点自体をズラす
-        for v in mesh_obj.data.vertices:
-            v.co.x += 1.0 # -1.0~1.0 を 0.0~2.0 に移動
-        
-        # X軸方向に伸ばすため、Planeのスケールを調整
-        mesh_obj.scale[0] = 0.5 # 長さ (進行方向: 1.0になる)
-        mesh_obj.scale[1] = self.road_width / 2.0 # 幅
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        curve_data.twist_mode = 'Z_UP'
 
-        # ※注意: ここでCurveを親にすると、Objectモードで回転・拡大した際にCurveモディファイアが二重にかかる
-        # (Double Transform) 問題が発生してメッシュが飛んでいくため、親子付けは行いません。
-
-        # 3. Arrayモディファイアの追加
-        array_mod = mesh_obj.modifiers.new(name="Array", type='ARRAY')
-        array_mod.fit_type = 'FIT_CURVE'
-        array_mod.curve = curve_obj
-        array_mod.use_relative_offset = True
-        array_mod.relative_offset_displace[0] = 1.0
-        # 道路の継ぎ目を滑らかにつなぐ（マージ）
-        array_mod.use_merge_vertices = True
-        # 編集モードでもモディファイアの結果を表示・編集ケージに適用
-        array_mod.show_in_editmode = True
-        array_mod.show_on_cage = True
         
-        # 4. Curveモディファイアの追加
-        curve_mod = mesh_obj.modifiers.new(name="Curve", type='CURVE')
-        curve_mod.object = curve_obj
-        curve_mod.deform_axis = 'POS_X'
-        # 編集モードでもモディファイアの結果を表示・編集ケージに適用
-        curve_mod.show_in_editmode = True
-        curve_mod.show_on_cage = True
+        spline = curve_data.splines.new('POLY')
+        spline.points.add(1)  # デフォルトで1点あるので、計2点になる
+        spline.points[0].co = (0.0, 0.0, 0.0, 1.0)  # (x, y, z, w)
+        spline.points[1].co = (4.0, 0.0, 0.0, 1.0)
+        
+        curve_obj = bpy.data.objects.new("RoadPath", curve_data)
+        context.collection.objects.link(curve_obj)
+        context.view_layer.objects.active = curve_obj
+        curve_obj.select_set(True)
+        
+        # 2. Geometry Nodesで道路メッシュを生成
+        gn_mod = curve_obj.modifiers.new(name="RoadGen", type='NODES')
+        group = bpy.data.node_groups.new("RoadGenTree", 'GeometryNodeTree')
+        gn_mod.node_group = group
+        
+        # バージョン互換性（Blender 4.0以降と3.x以前）
+        if hasattr(group, "interface"):
+            group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+            group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+        else:
+            group.inputs.new('NodeSocketGeometry', 'Geometry')
+            group.outputs.new('NodeSocketGeometry', 'Geometry')
+            
+        nodes = group.nodes
+        links = group.links
+        
+        node_in = nodes.new('NodeGroupInput')
+        node_out = nodes.new('NodeGroupOutput')
+        
+        # Fillet Curve: 角を自動的に丸める（Z-fighting防止）
+        # 各頂点のradius属性（Alt+S）をフィレット半径の倍率として使用
+        # → radius=1.0（デフォルト）：通常通り角が丸まる
+        # → radius=0.0（Alt+S → 0）：丸めなし＝道路がその点を必ず通過する
+        fillet_curve = nodes.new('GeometryNodeFilletCurve')
+        fillet_curve.mode = 'POLY'
+        fillet_curve.inputs['Count'].default_value = 16
+        # S字カーブなどで隣り合うフィレット同士が重ならないように半径を自動制限
+        fillet_curve.inputs['Limit Radius'].default_value = True
+        
+        # 基本フィレット半径 × 各頂点のradius属性（フィレット前に読み取る）
+        base_radius = nodes.new('ShaderNodeValue')
+        base_radius.outputs[0].default_value = self.road_width * 1.0
+        
+        radius_attr = nodes.new('GeometryNodeInputRadius')
+        
+        multiply = nodes.new('ShaderNodeMath')
+        multiply.operation = 'MULTIPLY'
+        
+        links.new(base_radius.outputs[0], multiply.inputs[0])
+        links.new(radius_attr.outputs[0], multiply.inputs[1])
+        links.new(multiply.outputs[0], fillet_curve.inputs['Radius'])
+        
+        links.new(node_in.outputs[0], fillet_curve.inputs['Curve'])
+        
+        # フィレット後、全頂点の半径を1.0に統一（道路幅を一定に保つ）
+        set_radius = nodes.new('GeometryNodeSetCurveRadius')
+        set_radius.inputs['Radius'].default_value = 1.0
+        
+        links.new(fillet_curve.outputs[0], set_radius.inputs['Curve'])
+        
+        # 道路本体 (Curve to Mesh)
+        curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
+        profile_line = nodes.new('GeometryNodeCurvePrimitiveLine')
+        profile_line.inputs['Start'].default_value = (-self.road_width / 2.0, 0, 0)
+        profile_line.inputs['End'].default_value = (self.road_width / 2.0, 0, 0)
+        
+        links.new(set_radius.outputs[0], curve_to_mesh.inputs['Curve'])
+        links.new(profile_line.outputs[0], curve_to_mesh.inputs['Profile Curve'])
+        
+        # 端っこの丸めキャップ (Endpoint Selection + Instance on Points)
+        endpoint_sel = nodes.new('GeometryNodeCurveEndpointSelection')
+        instance_pts = nodes.new('GeometryNodeInstanceOnPoints')
+        mesh_circle = nodes.new('GeometryNodeMeshCircle')
+        mesh_circle.inputs['Radius'].default_value = self.road_width / 2.0
+        mesh_circle.fill_type = 'NGON'
+        
+        links.new(set_radius.outputs[0], instance_pts.inputs['Points'])
+        links.new(endpoint_sel.outputs[0], instance_pts.inputs['Selection'])
+        links.new(mesh_circle.outputs[0], instance_pts.inputs['Instance'])
+        
+        # 曲がり角の内側で重なった頂点を自動マージ（Z-fighting防止）
+        merge = nodes.new('GeometryNodeMergeByDistance')
+        merge.inputs['Distance'].default_value = 0.001
+        
+        links.new(curve_to_mesh.outputs[0], merge.inputs['Geometry'])
+        
+        # 合成して出力
+        join_geo = nodes.new('GeometryNodeJoinGeometry')
+        links.new(merge.outputs[0], join_geo.inputs[0])
+        links.new(instance_pts.outputs[0], join_geo.inputs[0])
+        
+        realize = nodes.new('GeometryNodeRealizeInstances')
+        links.new(join_geo.outputs[0], realize.inputs[0])
+        links.new(realize.outputs[0], node_out.inputs[0])
+        
+        # アクティブオブジェクトをメインのカーブに戻す
+        context.view_layer.objects.active = curve_obj
+        curve_obj.select_set(True)
 
         print("スプライン道路を生成しました。")
         return {'FINISHED'}
