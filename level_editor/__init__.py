@@ -16,6 +16,9 @@ import copy
 import mathutils
 import json
 
+#自作モジュールのインポート
+from .vertex_stretch import MYADDON_OT_strech_vertex
+
 # Blenderのコンソール出力をUTF-8に設定（Windows文字化け対策）
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -43,6 +46,7 @@ try:
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 except Exception:
     pass
+
 
 # ブレンダーに登録するアドオン情報
 bl_info = {
@@ -79,17 +83,6 @@ class TOPBAR_MT_my_menu(bpy.types.Menu):
         self.layout.menu(TOPBAR_MT_my_menu.bl_idname)
 
 
-# オペレータ 頂点を伸ばす
-class MYADDON_OT_strech_vertex(bpy.types.Operator):
-    bl_idname = "myaddon.myaddon_ot_strech_vertex"
-    bl_label = "頂点を伸ばす"
-    bl_description = "選択した頂点を引っ張って伸ばします"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        bpy.data.objects['Cube'].data.vertices[0].co.x += 1.0
-        print("頂点を伸ばしました。")
-        return {'FINISHED'}
 
 
 # オペレータ ICO球生成
