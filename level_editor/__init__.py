@@ -528,7 +528,7 @@ def draw_menu_manual(self, context):
 # ブレンダに登録するクラスリスト
 classes = [
     TOPBAR_MT_my_menu,
-    MYADDON_OT_strech_vertex,
+    MYADDON_OT_strech_vertex,#済み
     MYADDON_OT_create_ico_sphere,
     MYADDON_OT_create_road_along_spline,
     MYADDON_OT_export_scene,
