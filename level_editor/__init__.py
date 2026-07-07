@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 from bl_ui import properties_object
-from bl_ui import properties_object
-from bl_ui import properties_object
-import contextlib
 import contextlib
 import bpy  # type: ignore
 import bpy_extras
@@ -18,6 +15,7 @@ import json
 
 #自作モジュールのインポート
 from .vertex_stretch import MYADDON_OT_strech_vertex
+from .create_ico_sphere import MYADDON_OT_create_ico_sphere
 
 # Blenderのコンソール出力をUTF-8に設定（Windows文字化け対策）
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -82,20 +80,6 @@ class TOPBAR_MT_my_menu(bpy.types.Menu):
     def submenu(self, context):
         self.layout.menu(TOPBAR_MT_my_menu.bl_idname)
 
-
-
-
-# オペレータ ICO球生成
-class MYADDON_OT_create_ico_sphere(bpy.types.Operator):
-    bl_idname = "myaddon.myaddon_ot_create_object"
-    bl_label = "ICO球生成"
-    bl_description = "ICO球を生成します"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        bpy.ops.mesh.primitive_ico_sphere_add()
-        print("ICO球を生成しました。")
-        return {'FINISHED'}
 
 
 # オペレータ スプライン道路生成
