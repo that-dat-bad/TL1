@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from bl_ui import properties_object
 from bl_ui import properties_object
+from bl_ui import properties_object
 import contextlib
 import contextlib
 import bpy  # type: ignore
@@ -13,6 +14,7 @@ import gpu
 import gpu_extras.batch
 import copy
 import mathutils
+import json
 
 # Blenderのコンソール出力をUTF-8に設定（Windows文字化け対策）
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -195,31 +197,12 @@ class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
         links.new(set_radius.outputs[0], curve_to_mesh.inputs['Curve'])
         links.new(profile_line.outputs[0], curve_to_mesh.inputs['Profile Curve'])
         
-        # 端っこの丸めキャップ (Endpoint Selection + Instance on Points)
-        endpoint_sel = nodes.new('GeometryNodeCurveEndpointSelection')
-        instance_pts = nodes.new('GeometryNodeInstanceOnPoints')
-        mesh_circle = nodes.new('GeometryNodeMeshCircle')
-        mesh_circle.inputs['Radius'].default_value = self.road_width / 2.0
-        mesh_circle.fill_type = 'NGON'
-        
-        links.new(set_radius.outputs[0], instance_pts.inputs['Points'])
-        links.new(endpoint_sel.outputs[0], instance_pts.inputs['Selection'])
-        links.new(mesh_circle.outputs[0], instance_pts.inputs['Instance'])
-        
-        # 曲がり角の内側で重なった頂点を自動マージ（Z-fighting防止）
+        # 重なった頂点を自動マージ（角・分岐点のZ-fighting軽減）
         merge = nodes.new('GeometryNodeMergeByDistance')
         merge.inputs['Distance'].default_value = 0.001
         
         links.new(curve_to_mesh.outputs[0], merge.inputs['Geometry'])
-        
-        # 合成して出力
-        join_geo = nodes.new('GeometryNodeJoinGeometry')
-        links.new(merge.outputs[0], join_geo.inputs[0])
-        links.new(instance_pts.outputs[0], join_geo.inputs[0])
-        
-        realize = nodes.new('GeometryNodeRealizeInstances')
-        links.new(join_geo.outputs[0], realize.inputs[0])
-        links.new(realize.outputs[0], node_out.inputs[0])
+        links.new(merge.outputs[0], node_out.inputs[0])
         
         # アクティブオブジェクトをメインのカーブに戻す
         context.view_layer.objects.active = curve_obj
@@ -234,11 +217,11 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
     bl_idname = "myaddon.myaddon_ot_export_scene"
     bl_label = "シーン出力"
     bl_description = "シーン情報をエクスポートします"
-    filename_ext = ".scene"
+    filename_ext = ".json"
 
     def execute(self, context):
         print("シーン情報をexportします")
-        self.export()
+        self.export_json()
         print("シーン情報をexportしました")
         self.report({'INFO'}, "シーン情報をexportしました")
         return {'FINISHED'}
@@ -276,6 +259,57 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
         for child in object.children:
             self.parse_scene_recursive(file, child, level + 1)
 
+    def parse_scene_recursive_json(self,data_parent,object,level):
+        #シーンのオブジェクト一個分のjsonオブジェクト生成
+        json_object = dict()
+        #オブジェクト種類
+        json_object["type"] = object.type
+        #オブジェクト名
+        json_object["name"] = object.name
+        
+        #オブジェクトのローカルトランスフォームから
+        #平行移動、回転、スケールを抽出
+        trans , rot , scale =object.matrix_local.decompose()
+        #回転を Quaternion から Euler （3軸での回転角）に変換
+        rot = rot.to_euler()
+        # ラジアンから度数法に変換
+        rot.x = math.degrees(rot.x)
+        rot.y = math.degrees(rot.y)
+        rot.z = math.degrees(rot.z)
+
+        #トランスフォーム情報をディクショナリに登録
+        transform=dict()
+        transform["location"] = [trans.x,trans.y,trans.z]
+        transform["rotation"] = [rot.x,rot.y,rot.z]
+        transform["scale"] = [scale.x,scale.y,scale.z]
+        #まとめて一個分のjsonオブジェクトに登録
+        json_object["transform"]=transform
+        
+        #カスタムプロパティ'file_name'
+        if "file_name" in object:
+            json_object["file_name"] = object["file_name"]
+        
+        #カスタムプロパティ'collider'
+        if "collider" in object:
+            collider=dict()
+            collider["type"] = object["collider"]
+            collider["center"]=object["collider_center"].to_list()
+            collider["size"]=object["collider_size"].to_list()
+            json_object["collider"]=collider
+
+
+
+        #一個分のjsonオブジェクトを親オブジェクトに登録
+        data_parent.append(json_object)
+
+        #子ノードがあれば
+        if len(object.children) >0:
+            #子ノードリストを作成
+            json_object["children"]=list()
+            #子ノードへ進む
+            for child in object.children:
+                self.parse_scene_recursive_json(json_object["children"],child,level+1)
+
     def export(self):
         """ファイル出力"""
         print("シーン情報をファイルに出力...%r" % self.filepath)
@@ -298,6 +332,37 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
                 
                 # シーン直下のオブジェクトをルートノード（深さ0）とし、再帰関数で走査
                 self.parse_scene_recursive(file, object, 0)
+    
+    def export_json(self):
+        """JSON形式でファイルに出力"""
+
+        #保存する情報をまとめるdict
+        json_object_root=dict()
+
+        #ノード名
+        json_object_root["name"] = "scene"
+        #オブジェクトリストを作成
+        json_object_root["objects"]=list()
+        
+        #シーン内の全オブジェクトについて
+        for object in bpy.context.scene.objects:
+            #親オブジェクトがあるものはスキップ(代わりに親から呼び出すから)
+            if (object.parent):
+                continue
+
+            # シーン直下のオブジェクトをルートノード（深さ0）とし、再帰関数で走査
+            self.parse_scene_recursive_json(json_object_root["objects"], object, 0)
+
+        #オブジェクトをJSON文字列にエンコード
+        json_text =json.dumps(json_object_root,ensure_ascii=False,cls=json.JSONEncoder,indent=4)
+        #コンソールに表示してみる
+        print(json_text)
+
+        #ファイルをテキスト形式で書き出し用にオープン
+        #スコープを抜けると自動的にクローズされる
+        with open(self.filepath, "wt",encoding="utf-8") as file:
+            #ファイルに文字列を書き込む
+            file.write(json_text)
 
     def write_and_print(self, file, text_str):
         print(text_str)
