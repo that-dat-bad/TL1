@@ -8,6 +8,7 @@ from .export_scene import MYADDON_OT_export_scene
 from .collider import MYADDON_OT_add_collider, OBJECT_PT_collider, DrawCollider, register_draw_handler, unregister_draw_handler
 from .file_name import MYADDON_OT_add_filename, OBJECT_PT_file_name
 from .create_road import MYADDON_OT_create_road_along_spline
+from .create_terrain import MYADDON_OT_create_terrain
 from .menu import TOPBAR_MT_my_menu
 from .disabled import MYADDON_OT_disable_operator, OBJECT_PT_disabled
 from .console_setup import setup_console_encoding
@@ -37,6 +38,7 @@ classes = [
     MYADDON_OT_strech_vertex,#済み
     MYADDON_OT_create_ico_sphere,#済み
     MYADDON_OT_create_road_along_spline,#済み
+    MYADDON_OT_create_terrain,#済み
     MYADDON_OT_export_scene,#済み
     MYADDON_OT_add_filename,#済み
     OBJECT_PT_file_name,#済み
