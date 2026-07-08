@@ -126,3 +126,15 @@ class DrawCollider:
         shader.bind()
         shader.uniform_float("color", (0.5, 1.0, 1.0, 1.0)) 
         batch.draw(shader)
+
+# 描画ハンドルの登録
+def register_draw_handler():
+    DrawCollider.handle = bpy.types.SpaceView3D.draw_handler_add(
+        DrawCollider.draw_collider, (), 'WINDOW', 'POST_VIEW'
+    )
+
+# 描画ハンドルの解除
+def unregister_draw_handler():
+    if DrawCollider.handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(DrawCollider.handle, 'WINDOW')
+        DrawCollider.handle = None
