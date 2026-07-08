@@ -7,31 +7,11 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
     bl_description = "ジオメトリノードを使用して起伏や道路平坦化を施した地形を生成します"
     bl_options = {'REGISTER', 'UNDO'}
 
-    grid_size: bpy.props.FloatProperty(  # type: ignore
-        name="グリッドサイズ",
-        description="地形グリッドの一辺の長さ(m)を指定します",
-        default=100.0,
-        min=1.0,
-    )
-
-    grid_subdivisions: bpy.props.IntProperty(  # type: ignore
-        name="グリッド分割数",
-        description="地形グリッドの分割数を指定します（多いほど精細になります）",
-        default=100,
-        min=2,
-        max=1000,
-    )
-
     def execute(self, context):
-        # 1. 地形用グリッドメッシュの作成
-        bpy.ops.mesh.primitive_grid_add(
-            size=self.grid_size,
-            x_subdivisions=self.grid_subdivisions,
-            y_subdivisions=self.grid_subdivisions,
-            location=(0.0, 0.0, 0.0)
-        )
-        terrain_obj = context.active_object
-        terrain_obj.name = "Terrain"
+        # 1. 空の地形用メッシュオブジェクトの作成 (サイズや分割数はジオメトリノード側で動的に制御します)
+        mesh_data = bpy.data.meshes.new("TerrainMesh")
+        terrain_obj = bpy.data.objects.new("Terrain", mesh_data)
+        context.collection.objects.link(terrain_obj)
 
         # 2. Geometry Nodes モディファイアの追加
         gn_mod = terrain_obj.modifiers.new(name="TerrainGen", type='NODES')
@@ -40,10 +20,24 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
         # 3. 入出力ソケットの定義 (Blender 4.0+ と 3.x 以前の互換性)
         if hasattr(group, "interface"):
-            # Geometry
+            # Geometry (入力は空だが、ノード仕様として残す)
             group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
             # Road Object
             road_socket = group.interface.new_socket('Road Object', in_out='INPUT', socket_type='NodeSocketObject')
+            # Terrain Size X / Y
+            size_x_socket = group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat')
+            size_x_socket.default_value = 100.0
+            size_y_socket = group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat')
+            size_y_socket.default_value = 100.0
+            # Subdivisions X / Y
+            sub_x_socket = group.interface.new_socket('Subdivisions X', in_out='INPUT', socket_type='NodeSocketInt')
+            sub_x_socket.default_value = 100
+            sub_x_socket.min_value = 2
+            sub_x_socket.max_value = 1000
+            sub_y_socket = group.interface.new_socket('Subdivisions Y', in_out='INPUT', socket_type='NodeSocketInt')
+            sub_y_socket.default_value = 100
+            sub_y_socket.min_value = 2
+            sub_y_socket.max_value = 1000
             # Noise Scale
             noise_scale_socket = group.interface.new_socket('Noise Scale', in_out='INPUT', socket_type='NodeSocketFloat')
             noise_scale_socket.default_value = 0.05
@@ -61,7 +55,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             hole_loc_socket.default_value = (0.0, 0.0, 0.0)
             # Hole Size
             hole_size_socket = group.interface.new_socket('Hole Size', in_out='INPUT', socket_type='NodeSocketFloat')
-            hole_size_socket.default_value = 3.0
+            hole_size_socket.default_value = 0.0 # 初期値は穴なし
 
             # Outputs
             group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
@@ -70,13 +64,17 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             # 3.x 互換
             group.inputs.new('NodeSocketGeometry', 'Geometry')
             group.inputs.new('NodeSocketObject', 'Road Object')
+            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 100.0
+            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 100.0
+            group.inputs.new('NodeSocketInt', 'Subdivisions X').default_value = 100
+            group.inputs.new('NodeSocketInt', 'Subdivisions Y').default_value = 100
             group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = 0.05
             group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = 10.0
             group.inputs.new('NodeSocketFloat', 'Flat Radius').default_value = 3.0
             group.inputs.new('NodeSocketFloat', 'Flat Blend').default_value = 2.0
             group.inputs.new('NodeSocketVector', 'Hole Location').default_value = (0.0, 0.0, 0.0)
-            group.inputs.new('NodeSocketFloat', 'Hole Size').default_value = 3.0
-
+            group.inputs.new('NodeSocketFloat', 'Hole Size').default_value = 0.0
+            
             group.outputs.new('NodeSocketGeometry', 'Geometry')
             group.outputs.new('NodeSocketFloat', 'Buildable Area')
 
@@ -85,13 +83,21 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
         # 入出力基本ノードの配置
         node_in = nodes.new('NodeGroupInput')
-        node_in.location = (-800, 0)
+        node_in.location = (-1100, 0)
         node_out = nodes.new('NodeGroupOutput')
         node_out.location = (1400, 0)
 
         # ==========================================
         # (A) ベースの高さ生成 (ノイズ起伏)
         # ==========================================
+        # 0. Grid Primitive ノード (ジオメトリノード側でグリッドサイズをリアルタイムに制御)
+        node_grid = nodes.new('GeometryNodeMeshGrid')
+        node_grid.location = (-800, 100)
+        links.new(node_in.outputs['Grid Size X'], node_grid.inputs['Size X'])
+        links.new(node_in.outputs['Grid Size Y'], node_grid.inputs['Size Y'])
+        links.new(node_in.outputs['Subdivisions X'], node_grid.inputs['Vertices X'])
+        links.new(node_in.outputs['Subdivisions Y'], node_grid.inputs['Vertices Y'])
+
         # 1. Position ノード
         node_pos = nodes.new('GeometryNodeInputPosition')
         node_pos.location = (-800, -300)
@@ -125,10 +131,10 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_comb_height.location = (0, -300)
         links.new(node_mult.outputs[0], node_comb_height.inputs['Z'])
 
-        # 6. Set Position: ベース高さを適用
+        # 6. Set Position: ベース高さを適用 (Gridノードの出力を接続)
         node_set_height = nodes.new('GeometryNodeSetPosition')
         node_set_height.location = (200, 100)
-        links.new(node_in.outputs['Geometry'], node_set_height.inputs['Geometry'])
+        links.new(node_grid.outputs['Mesh'], node_set_height.inputs['Geometry'])
         links.new(node_comb_height.outputs['Vector'], node_set_height.inputs['Offset'])
 
 
@@ -207,50 +213,105 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_sep_curr.outputs['Y'], node_comb_flat.inputs['Y'])
         links.new(node_mix_z.outputs[0], node_comb_flat.inputs['Z'])
 
-        # 8. Set Position: 平坦化位置を適用
-        node_set_flat = nodes.new('GeometryNodeSetPosition')
-        node_set_flat.location = (1100, 100)
-        links.new(node_set_height.outputs['Geometry'], node_set_flat.inputs['Geometry'])
-        links.new(node_comb_flat.outputs['Vector'], node_set_flat.inputs['Position'])
-
-
-        # ==========================================
-        # (C) 穴あけの基礎 (指定座標からの距離による削除)
-        # ==========================================
-        # 1. Vector Distance (Hole Location と各頂点の距離)
-        node_hole_dist = nodes.new('ShaderNodeVectorMath')
-        node_hole_dist.operation = 'DISTANCE'
-        node_hole_dist.location = (500, -100)
-        links.new(node_in.outputs['Hole Location'], node_hole_dist.inputs[0])
-
-        # 現在のPositionを入力
-        node_pos_c = nodes.new('GeometryNodeInputPosition')
-        node_pos_c.location = (300, -100)
-        links.new(node_pos_c.outputs['Position'], node_hole_dist.inputs[1])
-
-        # 2. Compare: Distance < Hole Size
+        # 8. 道路オブジェクトが存在するか判定 (要素数 > 0)
+        # Mesh要素数
         try:
-            node_comp_hole = nodes.new('FunctionNodeCompare')
-            node_comp_hole.data_type = 'FLOAT'
-            node_comp_hole.operation = 'LESS_THAN'
+            node_dom_mesh = nodes.new('GeometryNodeAttributeDomainSize')
         except RuntimeError:
-            node_comp_hole = nodes.new('ShaderNodeMath')
-            node_comp_hole.operation = 'LESS_THAN'
-        node_comp_hole.location = (700, -100)
-        dist_out = node_hole_dist.outputs['Value'] if 'Value' in node_hole_dist.outputs else node_hole_dist.outputs[0]
-        links.new(dist_out, node_comp_hole.inputs[0])
-        links.new(node_in.outputs['Hole Size'], node_comp_hole.inputs[1])
+            node_dom_mesh = nodes.new('GeometryNodeDomainSize')
+        node_dom_mesh.component = 'MESH'
+        node_dom_mesh.location = (600, 600)
+        links.new(node_road_info.outputs['Geometry'], node_dom_mesh.inputs['Geometry'])
 
-        # 3. Delete Geometry: 条件を満たす頂点/面を削除
-        node_delete_geo = nodes.new('GeometryNodeDeleteGeometry')
-        node_delete_geo.domain = 'POINT'
-        node_delete_geo.location = (900, -100)
-        links.new(node_set_flat.outputs['Geometry'], node_delete_geo.inputs['Geometry'])
-        comp_hole_out = node_comp_hole.outputs['Result'] if 'Result' in node_comp_hole.outputs else node_comp_hole.outputs[0]
-        links.new(comp_hole_out, node_delete_geo.inputs['Selection'])
+        # Curve要素数
+        try:
+            node_dom_curve = nodes.new('GeometryNodeAttributeDomainSize')
+        except RuntimeError:
+            node_dom_curve = nodes.new('GeometryNodeDomainSize')
+        node_dom_curve.component = 'CURVE'
+        node_dom_curve.location = (600, 750)
+        links.new(node_road_info.outputs['Geometry'], node_dom_curve.inputs['Geometry'])
+
+        # 要素数合計
+        node_dom_sum = nodes.new('ShaderNodeMath')
+        node_dom_sum.operation = 'ADD'
+        node_dom_sum.location = (800, 670)
+        mesh_count_out = node_dom_mesh.outputs['Point Count'] if 'Point Count' in node_dom_mesh.outputs else node_dom_mesh.outputs[0]
+        curve_count_out = node_dom_curve.outputs['Point Count'] if 'Point Count' in node_dom_curve.outputs else node_dom_curve.outputs[0]
+        links.new(mesh_count_out, node_dom_sum.inputs[0])
+        links.new(curve_count_out, node_dom_sum.inputs[1])
+
+        # 比較: 合計 > 0
+        try:
+            node_comp_exist = nodes.new('FunctionNodeCompare')
+            node_comp_exist.data_type = 'INT'
+            node_comp_exist.operation = 'GREATER_THAN'
+        except RuntimeError:
+            node_comp_exist = nodes.new('ShaderNodeMath')
+            node_comp_exist.operation = 'GREATER_THAN'
+        node_comp_exist.location = (950, 670)
+        links.new(node_dom_sum.outputs[0], node_comp_exist.inputs[0])
+        node_comp_exist.inputs[1].default_value = 0
+
+        # Switchノードで道路がある場合のみ平坦化した座標を適用
+        node_switch_pos = nodes.new('GeometryNodeSwitch')
+        try:
+            node_switch_pos.input_type = 'VECTOR'
+        except AttributeError:
+            try:
+                node_switch_pos.data_type = 'VECTOR'
+            except AttributeError:
+                pass
+        node_switch_pos.location = (1100, 500)
+        comp_exist_out = node_comp_exist.outputs['Result'] if 'Result' in node_comp_exist.outputs else node_comp_exist.outputs[0]
+        links.new(comp_exist_out, node_switch_pos.inputs['Switch'])
+        
+        # Falseのとき: 元の位置(ノイズによる起伏がある状態)
+        node_pos_f = nodes.new('GeometryNodeInputPosition')
+        node_pos_f.location = (950, 500)
+        links.new(node_pos_f.outputs['Position'], node_switch_pos.inputs['False'])
+        
+        # Trueのとき: 平坦化座標
+        links.new(node_comb_flat.outputs['Vector'], node_switch_pos.inputs['True'])
+
+        # 9. Set Position: 位置を適用
+        node_set_flat = nodes.new('GeometryNodeSetPosition')
+        node_set_flat.location = (1250, 100)
+        links.new(node_set_height.outputs['Geometry'], node_set_flat.inputs['Geometry'])
+        links.new(node_switch_pos.outputs['Output'] if 'Output' in node_switch_pos.outputs else node_switch_pos.outputs[0], node_set_flat.inputs['Position'])
+
+
+
+        # ==========================================
+        # (C) 穴あけの基礎 (Mesh Boolean による滑らかな球状カット)
+        # ==========================================
+        # 1. Ico Sphere ノード (穴用の球体をノード内で生成)
+        node_ico = nodes.new('GeometryNodeMeshIcoSphere')
+        node_ico.location = (500, -100)
+        node_ico.inputs['Subdivisions'].default_value = 3
+        links.new(node_in.outputs['Hole Size'], node_ico.inputs['Radius'])
+
+        # 2. Transform Geometry (球体を Hole Location に配置)
+        node_trans = nodes.new('GeometryNodeTransform')
+        node_trans.location = (700, -100)
+        ico_mesh_out = node_ico.outputs['Mesh'] if 'Mesh' in node_ico.outputs else node_ico.outputs[0]
+        links.new(ico_mesh_out, node_trans.inputs['Geometry'])
+        
+        # Translationソケットの接続 (Blender 4.0+ 互換)
+        if 'Translation' in node_trans.inputs:
+            links.new(node_in.outputs['Hole Location'], node_trans.inputs['Translation'])
+
+        # 3. Mesh Boolean (地形から球体を差し引いて綺麗な円形の穴を作る)
+        node_boolean = nodes.new('GeometryNodeMeshBoolean')
+        node_boolean.operation = 'DIFFERENCE'
+        node_boolean.location = (950, -100)
+        links.new(node_set_flat.outputs['Geometry'], node_boolean.inputs['Mesh 1'])
+        trans_geo_out = node_trans.outputs['Geometry'] if 'Geometry' in node_trans.outputs else node_trans.outputs[0]
+        links.new(trans_geo_out, node_boolean.inputs['Mesh 2'])
 
         # 出力を最終的なGeometryに接続
-        links.new(node_delete_geo.outputs['Geometry'], node_out.inputs['Geometry'])
+        boolean_mesh_out = node_boolean.outputs['Mesh'] if 'Mesh' in node_boolean.outputs else node_boolean.outputs[0]
+        links.new(boolean_mesh_out, node_out.inputs['Geometry'])
 
 
         # ==========================================
