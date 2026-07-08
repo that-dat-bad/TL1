@@ -1,13 +1,5 @@
 # -*- coding: utf-8 -*-
-from bl_ui import properties_object
-import contextlib
 import bpy  # type: ignore
-import bpy_extras
-import math
-import mathutils
-import json
-
-
 
 #分離モジュールのインポート
 from .vertex_stretch import MYADDON_OT_strech_vertex
