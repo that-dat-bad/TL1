@@ -23,8 +23,8 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
             # Road / Mountain / Valley Objects
             group.interface.new_socket('Road Object', in_out='INPUT', socket_type='NodeSocketObject')
-            group.interface.new_socket('Mountain Object', in_out='INPUT', socket_type='NodeSocketObject')
-            group.interface.new_socket('Valley Object', in_out='INPUT', socket_type='NodeSocketObject')
+            group.interface.new_socket('Mountain Collection', in_out='INPUT', socket_type='NodeSocketCollection')
+            group.interface.new_socket('Valley Collection', in_out='INPUT', socket_type='NodeSocketCollection')
             # Grid Dimensions
             group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
             group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
@@ -59,8 +59,8 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             # 3.x 互換
             group.inputs.new('NodeSocketGeometry', 'Geometry')
             group.inputs.new('NodeSocketObject', 'Road Object')
-            group.inputs.new('NodeSocketObject', 'Mountain Object')
-            group.inputs.new('NodeSocketObject', 'Valley Object')
+            group.inputs.new('NodeSocketCollection', 'Mountain Collection')
+            group.inputs.new('NodeSocketCollection', 'Valley Collection')
             group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 200.0
             group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 200.0
             group.inputs.new('NodeSocketInt', 'Subdivisions X').default_value = 10
@@ -95,7 +95,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         # (Geometry Proximityがカーブを非サポートであるエラーを回避するため)
         # ==========================================
         def add_curve_to_mesh_bypass(obj_geo_output, loc_x, loc_y):
-            # Domain Size (Curve の Spline数)
+            # Domain Size (Curve の Point数)
             try:
                 node_dom = nodes.new('GeometryNodeAttributeDomainSize')
             except RuntimeError:
@@ -104,12 +104,12 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_dom.location = (loc_x, loc_y + 150)
             links.new(obj_geo_output, node_dom.inputs['Geometry'])
 
-            # Compare (Spline Count > 0)
+            # Compare (Point Count > 0)
             node_comp = nodes.new('ShaderNodeMath')
             node_comp.operation = 'GREATER_THAN'
             node_comp.location = (loc_x + 200, loc_y + 150)
-            spline_count_out = node_dom.outputs['Spline Count'] if 'Spline Count' in node_dom.outputs else node_dom.outputs[0]
-            links.new(spline_count_out, node_comp.inputs[0])
+            point_count_out = node_dom.outputs['Point Count'] if 'Point Count' in node_dom.outputs else node_dom.outputs[0]
+            links.new(point_count_out, node_comp.inputs[0])
             node_comp.inputs[1].default_value = 0.0
 
             # Curve to Mesh
@@ -133,6 +133,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             links.new(node_c2m.outputs['Mesh'], node_switch.inputs['True'])
 
             return node_switch.outputs['Output'] if 'Output' in node_switch.outputs else node_switch.outputs[0]
+
 
 
         # ==========================================
@@ -176,18 +177,74 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
 
         # ==========================================
-        # (B) スプライン山脈 (Mountain Object)
-        # ==========================================
-        # 1. Object Info (山オブジェクト情報)
-        node_mt_info = nodes.new('GeometryNodeObjectInfo')
+        # 1. Collection Info (山コレクション情報)
+        node_mt_info = nodes.new('GeometryNodeCollectionInfo')
         node_mt_info.transform_space = 'RELATIVE'
         node_mt_info.location = (-1300, 600)
-        links.new(node_in.outputs['Mountain Object'], node_mt_info.inputs['Object'])
+        node_mt_info.inputs['Separate Children'].default_value = True
+        node_mt_info.inputs['Reset Children'].default_value = False
+        links.new(node_in.outputs['Mountain Collection'], node_mt_info.inputs['Collection'])
 
-        # Realize Instances (インスタンスを実体化してカーブ/メッシュ情報を読み取れるようにする)
+        # Realize Instances
         node_mt_realize = nodes.new('GeometryNodeRealizeInstances')
         node_mt_realize.location = (-1150, 600)
-        links.new(node_mt_info.outputs['Geometry'], node_mt_realize.inputs['Geometry'])
+        links.new(node_mt_info.outputs['Instances'], node_mt_realize.inputs['Geometry'])
+
+        # Store Named Attribute (custom_radius)
+        node_mt_store_rad = nodes.new('GeometryNodeStoreNamedAttribute')
+        node_mt_store_rad.inputs['Name'].default_value = 'custom_radius'
+        node_mt_store_rad.location = (-1150, 750)
+        node_mt_in_rad = nodes.new('GeometryNodeInputRadius')
+        node_mt_in_rad.location = (-1300, 750)
+        links.new(node_mt_realize.outputs['Geometry'], node_mt_store_rad.inputs['Geometry'])
+        links.new(node_mt_in_rad.outputs[0], node_mt_store_rad.inputs['Value'])
+
+        # Store Named Attribute (custom_tilt)
+        node_mt_store_tilt = nodes.new('GeometryNodeStoreNamedAttribute')
+        node_mt_store_tilt.inputs['Name'].default_value = 'custom_tilt'
+        node_mt_store_tilt.location = (-1000, 750)
+        node_mt_in_tilt = nodes.new('GeometryNodeInputCurveTilt')
+        node_mt_in_tilt.location = (-1150, 700)
+        links.new(node_mt_store_rad.outputs['Geometry'], node_mt_store_tilt.inputs['Geometry'])
+        links.new(node_mt_in_tilt.outputs[0], node_mt_store_tilt.inputs['Value'])
+
+        # Curve to Points でポイントクラウド化し、サンプリングを確実に動作させる
+        node_mt_c2p = nodes.new('GeometryNodeCurveToPoints')
+        node_mt_c2p.mode = 'COUNT'
+        node_mt_c2p.inputs['Count'].default_value = 20
+        node_mt_c2p.location = (-850, 800)
+        links.new(node_mt_store_tilt.outputs['Geometry'], node_mt_c2p.inputs['Curve'])
+
+        # 最近接ポイントのインデックスを取得
+        node_mt_sample_near = nodes.new('GeometryNodeSampleNearest')
+        node_mt_sample_near.location = (-700, 900)
+        links.new(node_mt_c2p.outputs['Points'], node_mt_sample_near.inputs['Geometry'])
+
+        # custom_radius 名前付きアトリビュートノードの作成
+        node_mt_attr_radius = nodes.new('GeometryNodeInputNamedAttribute')
+        node_mt_attr_radius.inputs['Name'].default_value = 'custom_radius'
+        node_mt_attr_radius.location = (-700, 800)
+
+        # 半径アトリビュートの取得とサンプリング (幅の調整用)
+        node_mt_sample_radius = nodes.new('GeometryNodeSampleIndex')
+        node_mt_sample_radius.data_type = 'FLOAT'
+        node_mt_sample_radius.location = (-550, 800)
+        links.new(node_mt_c2p.outputs['Points'], node_mt_sample_radius.inputs['Geometry'])
+        links.new(node_mt_attr_radius.outputs['Attribute'], node_mt_sample_radius.inputs['Value'])
+        links.new(node_mt_sample_near.outputs['Index'], node_mt_sample_radius.inputs['Index'])
+
+        # custom_tilt 名前付きアトリビュートノードの作成
+        node_mt_attr_tilt = nodes.new('GeometryNodeInputNamedAttribute')
+        node_mt_attr_tilt.inputs['Name'].default_value = 'custom_tilt'
+        node_mt_attr_tilt.location = (-700, 700)
+
+        # 傾きアトリビュートの取得とサンプリング (高さの調整用)
+        node_mt_sample_tilt = nodes.new('GeometryNodeSampleIndex')
+        node_mt_sample_tilt.data_type = 'FLOAT'
+        node_mt_sample_tilt.location = (-550, 700)
+        links.new(node_mt_c2p.outputs['Points'], node_mt_sample_tilt.inputs['Geometry'])
+        links.new(node_mt_attr_tilt.outputs['Attribute'], node_mt_sample_tilt.inputs['Value'])
+        links.new(node_mt_sample_near.outputs['Index'], node_mt_sample_tilt.inputs['Index'])
 
         # 1.5. Curve to Mesh バイパス
         mt_geometry_processed = add_curve_to_mesh_bypass(node_mt_realize.outputs['Geometry'], -1000, 650)
@@ -198,6 +255,13 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_mt_prox.location = (-600, 600)
         links.new(mt_geometry_processed, node_mt_prox.inputs['Target'])
 
+        # 個別半径（radius）を適用するための乗算ノード
+        node_mt_radius_mult = nodes.new('ShaderNodeMath')
+        node_mt_radius_mult.operation = 'MULTIPLY'
+        node_mt_radius_mult.location = (-500, 750)
+        links.new(node_in.outputs['Mountain Radius'], node_mt_radius_mult.inputs[0])
+        links.new(node_mt_sample_radius.outputs['Value'], node_mt_radius_mult.inputs[1])
+
         # 3. Map Range (距離をウェイト 0.0 ~ 1.0 にマッピング)
         node_mt_map = nodes.new('ShaderNodeMapRange')
         node_mt_map.interpolation_type = 'SMOOTHSTEP'
@@ -206,7 +270,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_mt_map.inputs['To Max'].default_value = 0.0
         node_mt_map.location = (-400, 600)
         links.new(node_mt_prox.outputs['Distance'], node_mt_map.inputs['Value'])
-        links.new(node_in.outputs['Mountain Radius'], node_mt_map.inputs['From Max'])
+        links.new(node_mt_radius_mult.outputs[0], node_mt_map.inputs['From Max'])
 
         # 4. 山のオブジェクト存在判定 (バイパス処理)
         try:
@@ -240,11 +304,24 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_mt_exist.inputs[1].default_value = 0.0
 
         # 山の合計隆起高さの算出
+        # 個別高さ（1.0 + tilt）を計算するノード
+        node_mt_height_factor = nodes.new('ShaderNodeMath')
+        node_mt_height_factor.operation = 'ADD'
+        node_mt_height_factor.inputs[1].default_value = 1.0
+        node_mt_height_factor.location = (-350, 450)
+        links.new(node_mt_sample_tilt.outputs['Value'], node_mt_height_factor.inputs[0])
+
+        node_mt_height_mult = nodes.new('ShaderNodeMath')
+        node_mt_height_mult.operation = 'MULTIPLY'
+        node_mt_height_mult.location = (-200, 450)
+        links.new(node_in.outputs['Mountain Height'], node_mt_height_mult.inputs[0])
+        links.new(node_mt_height_factor.outputs[0], node_mt_height_mult.inputs[1])
+
         node_mt_mult1 = nodes.new('ShaderNodeMath')
         node_mt_mult1.operation = 'MULTIPLY'
         node_mt_mult1.location = (-200, 600)
         links.new(node_mt_map.outputs['Result'], node_mt_mult1.inputs[0])
-        links.new(node_in.outputs['Mountain Height'], node_mt_mult1.inputs[1])
+        links.new(node_mt_height_mult.outputs[0], node_mt_mult1.inputs[1])
 
         node_mt_height_final = nodes.new('ShaderNodeMath')
         node_mt_height_final.operation = 'MULTIPLY'
@@ -257,16 +334,76 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         # ==========================================
         # (C) スプライン谷 (Valley Object)
         # ==========================================
-        # 1. Object Info (谷オブジェクト情報)
-        node_vl_info = nodes.new('GeometryNodeObjectInfo')
+        # 1. Collection Info (谷コレクション情報)
+        node_vl_info = nodes.new('GeometryNodeCollectionInfo')
         node_vl_info.transform_space = 'RELATIVE'
         node_vl_info.location = (-1300, -400)
-        links.new(node_in.outputs['Valley Object'], node_vl_info.inputs['Object'])
+        node_vl_info.inputs['Separate Children'].default_value = True
+        node_vl_info.inputs['Reset Children'].default_value = False
+        links.new(node_in.outputs['Valley Collection'], node_vl_info.inputs['Collection'])
 
         # Realize Instances
         node_vl_realize = nodes.new('GeometryNodeRealizeInstances')
         node_vl_realize.location = (-1150, -400)
-        links.new(node_vl_info.outputs['Geometry'], node_vl_realize.inputs['Geometry'])
+        links.new(node_vl_info.outputs['Instances'], node_vl_realize.inputs['Geometry'])
+
+        # Capture Attribute の作成 (Radius用)
+        node_vl_cap_rad = nodes.new('GeometryNodeCaptureAttribute')
+        # Store Named Attribute (custom_radius)
+        node_vl_store_rad = nodes.new('GeometryNodeStoreNamedAttribute')
+        node_vl_store_rad.inputs['Name'].default_value = 'custom_radius'
+        node_vl_store_rad.location = (-1150, -150)
+        node_vl_in_rad = nodes.new('GeometryNodeInputRadius')
+        node_vl_in_rad.location = (-1300, -150)
+        links.new(node_vl_realize.outputs['Geometry'], node_vl_store_rad.inputs['Geometry'])
+        links.new(node_vl_in_rad.outputs[0], node_vl_store_rad.inputs['Value'])
+
+        # Store Named Attribute (custom_tilt)
+        node_vl_store_tilt = nodes.new('GeometryNodeStoreNamedAttribute')
+        node_vl_store_tilt.inputs['Name'].default_value = 'custom_tilt'
+        node_vl_store_tilt.location = (-1000, -150)
+        node_vl_in_tilt = nodes.new('GeometryNodeInputCurveTilt')
+        node_vl_in_tilt.location = (-1150, -200)
+        links.new(node_vl_store_rad.outputs['Geometry'], node_vl_store_tilt.inputs['Geometry'])
+        links.new(node_vl_in_tilt.outputs[0], node_vl_store_tilt.inputs['Value'])
+
+        # Curve to Points でポイントクラウド化し、サンプリングを確実に動作させる
+        node_vl_c2p = nodes.new('GeometryNodeCurveToPoints')
+        node_vl_c2p.mode = 'COUNT'
+        node_vl_c2p.inputs['Count'].default_value = 20
+        node_vl_c2p.location = (-850, -100)
+        links.new(node_vl_store_tilt.outputs['Geometry'], node_vl_c2p.inputs['Curve'])
+
+        # 最近接ポイントのインデックスを取得 (谷用)
+        node_vl_sample_near = nodes.new('GeometryNodeSampleNearest')
+        node_vl_sample_near.location = (-700, 0)
+        links.new(node_vl_c2p.outputs['Points'], node_vl_sample_near.inputs['Geometry'])
+
+        # custom_radius 名前付きアトリビュートノードの作成
+        node_vl_attr_radius = nodes.new('GeometryNodeInputNamedAttribute')
+        node_vl_attr_radius.inputs['Name'].default_value = 'custom_radius'
+        node_vl_attr_radius.location = (-700, -100)
+
+        # 半径アトリビュートの取得とサンプリング (幅の調整用)
+        node_vl_sample_radius = nodes.new('GeometryNodeSampleIndex')
+        node_vl_sample_radius.data_type = 'FLOAT'
+        node_vl_sample_radius.location = (-550, -100)
+        links.new(node_vl_c2p.outputs['Points'], node_vl_sample_radius.inputs['Geometry'])
+        links.new(node_vl_attr_radius.outputs['Attribute'], node_vl_sample_radius.inputs['Value'])
+        links.new(node_vl_sample_near.outputs['Index'], node_vl_sample_radius.inputs['Index'])
+
+        # custom_tilt 名前付きアトリビュートノードの作成
+        node_vl_attr_tilt = nodes.new('GeometryNodeInputNamedAttribute')
+        node_vl_attr_tilt.inputs['Name'].default_value = 'custom_tilt'
+        node_vl_attr_tilt.location = (-700, -200)
+
+        # 傾きアトリビュートの取得とサンプリング (深さの調整用)
+        node_vl_sample_tilt = nodes.new('GeometryNodeSampleIndex')
+        node_vl_sample_tilt.data_type = 'FLOAT'
+        node_vl_sample_tilt.location = (-550, -200)
+        links.new(node_vl_c2p.outputs['Points'], node_vl_sample_tilt.inputs['Geometry'])
+        links.new(node_vl_attr_tilt.outputs['Attribute'], node_vl_sample_tilt.inputs['Value'])
+        links.new(node_vl_sample_near.outputs['Index'], node_vl_sample_tilt.inputs['Index'])
 
         # 1.5. Curve to Mesh バイパス
         vl_geometry_processed = add_curve_to_mesh_bypass(node_vl_realize.outputs['Geometry'], -1000, -350)
@@ -277,6 +414,13 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_vl_prox.location = (-600, -400)
         links.new(vl_geometry_processed, node_vl_prox.inputs['Target'])
 
+        # 個別半径（radius）を適用するための乗算ノード
+        node_vl_radius_mult = nodes.new('ShaderNodeMath')
+        node_vl_radius_mult.operation = 'MULTIPLY'
+        node_vl_radius_mult.location = (-500, -250)
+        links.new(node_in.outputs['Valley Radius'], node_vl_radius_mult.inputs[0])
+        links.new(node_vl_sample_radius.outputs['Value'], node_vl_radius_mult.inputs[1])
+
         # 3. Map Range (距離をウェイトにマッピング)
         node_vl_map = nodes.new('ShaderNodeMapRange')
         node_vl_map.interpolation_type = 'SMOOTHSTEP'
@@ -285,7 +429,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_vl_map.inputs['To Max'].default_value = 0.0
         node_vl_map.location = (-400, -400)
         links.new(node_vl_prox.outputs['Distance'], node_vl_map.inputs['Value'])
-        links.new(node_in.outputs['Valley Radius'], node_vl_map.inputs['From Max'])
+        links.new(node_vl_radius_mult.outputs[0], node_vl_map.inputs['From Max'])
 
         # 4. 谷のオブジェクト存在判定 (バイパス処理)
         try:
@@ -319,11 +463,24 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_vl_exist.inputs[1].default_value = 0.0
 
         # 谷の合計沈下量の算出
+        # 個別深さ（1.0 + tilt）を計算するノード
+        node_vl_height_factor = nodes.new('ShaderNodeMath')
+        node_vl_height_factor.operation = 'ADD'
+        node_vl_height_factor.inputs[1].default_value = 1.0
+        node_vl_height_factor.location = (-350, -550)
+        links.new(node_vl_sample_tilt.outputs['Value'], node_vl_height_factor.inputs[0])
+
+        node_vl_depth_mult = nodes.new('ShaderNodeMath')
+        node_vl_depth_mult.operation = 'MULTIPLY'
+        node_vl_depth_mult.location = (-200, -550)
+        links.new(node_in.outputs['Valley Depth'], node_vl_depth_mult.inputs[0])
+        links.new(node_vl_height_factor.outputs[0], node_vl_depth_mult.inputs[1])
+
         node_vl_mult1 = nodes.new('ShaderNodeMath')
         node_vl_mult1.operation = 'MULTIPLY'
         node_vl_mult1.location = (-200, -400)
         links.new(node_vl_map.outputs['Result'], node_vl_mult1.inputs[0])
-        links.new(node_in.outputs['Valley Depth'], node_vl_mult1.inputs[1])
+        links.new(node_vl_depth_mult.outputs[0], node_vl_mult1.inputs[1])
 
         node_vl_depth_final = nodes.new('ShaderNodeMath')
         node_vl_depth_final.operation = 'MULTIPLY'
@@ -603,6 +760,12 @@ class MYADDON_OT_create_mountain_along_spline(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        # 0. 山脈コレクションを取得、または新規作成してシーンに登録
+        mountain_col = bpy.data.collections.get("Mountains")
+        if not mountain_col:
+            mountain_col = bpy.data.collections.new("Mountains")
+            context.scene.collection.children.link(mountain_col)
+
         # 1. 山脈用のスプライン(POLY)を作成
         curve_data = bpy.data.curves.new("MountainPath", 'CURVE')
         curve_data.dimensions = '3D'
@@ -614,13 +777,13 @@ class MYADDON_OT_create_mountain_along_spline(bpy.types.Operator):
         spline.points[1].co = (20.0, 20.0, 0.0, 1.0)
 
         curve_obj = bpy.data.objects.new("MountainPath", curve_data)
-        context.collection.objects.link(curve_obj)
+        mountain_col.objects.link(curve_obj)
 
         # アクティブを新しく作ったカーブにして、編集しやすくする
         context.view_layer.objects.active = curve_obj
         curve_obj.select_set(True)
 
-        print("スプライン山脈を生成しました。")
+        print("スプライン山脈を生成し、コレクション「Mountains」に追加しました。")
         return {'FINISHED'}
 
 
@@ -632,6 +795,12 @@ class MYADDON_OT_create_valley_along_spline(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        # 0. 谷コレクションを取得、または新規作成してシーンに登録
+        valley_col = bpy.data.collections.get("Valleys")
+        if not valley_col:
+            valley_col = bpy.data.collections.new("Valleys")
+            context.scene.collection.children.link(valley_col)
+
         # 1. 谷用のスプライン(POLY)を作成
         curve_data = bpy.data.curves.new("ValleyPath", 'CURVE')
         curve_data.dimensions = '3D'
@@ -643,12 +812,12 @@ class MYADDON_OT_create_valley_along_spline(bpy.types.Operator):
         spline.points[1].co = (20.0, -20.0, 0.0, 1.0)
 
         curve_obj = bpy.data.objects.new("ValleyPath", curve_data)
-        context.collection.objects.link(curve_obj)
+        valley_col.objects.link(curve_obj)
 
         # アクティブを新しく作ったカーブにして、編集しやすくする
         context.view_layer.objects.active = curve_obj
         curve_obj.select_set(True)
 
-        print("スプライン谷を生成しました。")
+        print("スプライン谷を生成し、コレクション「Valleys」に追加しました。")
         return {'FINISHED'}
 
