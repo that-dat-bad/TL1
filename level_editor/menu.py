@@ -3,7 +3,7 @@ from .vertex_stretch import MYADDON_OT_strech_vertex
 from .create_ico_sphere import MYADDON_OT_create_ico_sphere
 from .export_scene import MYADDON_OT_export_scene
 from .create_road import MYADDON_OT_create_road_along_spline
-from .create_terrain import MYADDON_OT_create_terrain
+from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
 
 # トップバーの拡張メニュー
 class TOPBAR_MT_my_menu(bpy.types.Menu):
@@ -18,12 +18,25 @@ class TOPBAR_MT_my_menu(bpy.types.Menu):
         self.layout.separator()
         self.layout.operator(MYADDON_OT_create_ico_sphere.bl_idname, text=MYADDON_OT_create_ico_sphere.bl_label)
         self.layout.separator()
-        self.layout.operator(MYADDON_OT_create_road_along_spline.bl_idname, text=MYADDON_OT_create_road_along_spline.bl_label)
-        self.layout.separator()
-        self.layout.operator(MYADDON_OT_create_terrain.bl_idname, text=MYADDON_OT_create_terrain.bl_label)
-        self.layout.separator()
         self.layout.operator(MYADDON_OT_export_scene.bl_idname, text=MYADDON_OT_export_scene.bl_label)
 
     def submenu(self, context):
         self.layout.menu(TOPBAR_MT_my_menu.bl_idname)
 
+#トップバーの拡張メニュー(地形生成)
+class TOPBAR_MT_terrain(bpy.types.Menu):
+    bl_idname = "TOPBAR_MT_terrain"
+    bl_label = "地形生成"
+    bl_description = "地形生成メニュー"
+
+    def draw(self, context):
+        self.layout.operator(MYADDON_OT_create_road_along_spline.bl_idname, text=MYADDON_OT_create_road_along_spline.bl_label)
+        self.layout.separator()
+        self.layout.operator(MYADDON_OT_create_terrain.bl_idname, text=MYADDON_OT_create_terrain.bl_label)
+        self.layout.separator()
+        self.layout.operator(MYADDON_OT_create_mountain_along_spline.bl_idname, text=MYADDON_OT_create_mountain_along_spline.bl_label)
+        self.layout.separator()
+        self.layout.operator(MYADDON_OT_create_valley_along_spline.bl_idname, text=MYADDON_OT_create_valley_along_spline.bl_label)
+
+    def submenu(self, context):
+        self.layout.menu(TOPBAR_MT_terrain.bl_idname)

@@ -16,7 +16,6 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         # 2. Geometry Nodes モディファイアの追加
         gn_mod = terrain_obj.modifiers.new(name="TerrainGen", type='NODES')
         group = bpy.data.node_groups.new("TerrainGenTree", 'GeometryNodeTree')
-        gn_mod.node_group = group
 
         # 3. 入出力ソケットの定義 (Blender 4.0+ と 3.x 以前の互換性)
         if hasattr(group, "interface"):
@@ -27,14 +26,14 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.interface.new_socket('Mountain Object', in_out='INPUT', socket_type='NodeSocketObject')
             group.interface.new_socket('Valley Object', in_out='INPUT', socket_type='NodeSocketObject')
             # Grid Dimensions
-            group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 100.0
-            group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 100.0
+            group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
+            group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
             sub_x = group.interface.new_socket('Subdivisions X', in_out='INPUT', socket_type='NodeSocketInt')
-            sub_x.default_value = 100
+            sub_x.default_value = 10
             sub_x.min_value = 2
             sub_x.max_value = 1000
             sub_y = group.interface.new_socket('Subdivisions Y', in_out='INPUT', socket_type='NodeSocketInt')
-            sub_y.default_value = 100
+            sub_y.default_value = 10
             sub_y.min_value = 2
             sub_y.max_value = 1000
             # Height and Noise Settings
@@ -62,10 +61,10 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.inputs.new('NodeSocketObject', 'Road Object')
             group.inputs.new('NodeSocketObject', 'Mountain Object')
             group.inputs.new('NodeSocketObject', 'Valley Object')
-            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 100.0
-            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 100.0
-            group.inputs.new('NodeSocketInt', 'Subdivisions X').default_value = 100
-            group.inputs.new('NodeSocketInt', 'Subdivisions Y').default_value = 100
+            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 200.0
+            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 200.0
+            group.inputs.new('NodeSocketInt', 'Subdivisions X').default_value = 10
+            group.inputs.new('NodeSocketInt', 'Subdivisions Y').default_value = 10
             group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = 0.05
             group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = 10.0
             group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = 15.0
@@ -79,6 +78,8 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             
             group.outputs.new('NodeSocketGeometry', 'Geometry')
             group.outputs.new('NodeSocketFloat', 'Buildable Area')
+
+        # (ノードとリンクの構築完了後に割り当てるよう、最後尾に移動します)
 
         nodes = group.nodes
         links = group.links
@@ -104,17 +105,12 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             links.new(obj_geo_output, node_dom.inputs['Geometry'])
 
             # Compare (Spline Count > 0)
-            try:
-                node_comp = nodes.new('FunctionNodeCompare')
-                node_comp.data_type = 'INT'
-                node_comp.operation = 'GREATER_THAN'
-            except RuntimeError:
-                node_comp = nodes.new('ShaderNodeMath')
-                node_comp.operation = 'GREATER_THAN'
+            node_comp = nodes.new('ShaderNodeMath')
+            node_comp.operation = 'GREATER_THAN'
             node_comp.location = (loc_x + 200, loc_y + 150)
             spline_count_out = node_dom.outputs['Spline Count'] if 'Spline Count' in node_dom.outputs else node_dom.outputs[0]
             links.new(spline_count_out, node_comp.inputs[0])
-            node_comp.inputs[1].default_value = 0
+            node_comp.inputs[1].default_value = 0.0
 
             # Curve to Mesh
             node_c2m = nodes.new('GeometryNodeCurveToMesh')
@@ -188,8 +184,13 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_mt_info.location = (-1300, 600)
         links.new(node_in.outputs['Mountain Object'], node_mt_info.inputs['Object'])
 
+        # Realize Instances (インスタンスを実体化してカーブ/メッシュ情報を読み取れるようにする)
+        node_mt_realize = nodes.new('GeometryNodeRealizeInstances')
+        node_mt_realize.location = (-1150, 600)
+        links.new(node_mt_info.outputs['Geometry'], node_mt_realize.inputs['Geometry'])
+
         # 1.5. Curve to Mesh バイパス
-        mt_geometry_processed = add_curve_to_mesh_bypass(node_mt_info.outputs['Geometry'], -1100, 650)
+        mt_geometry_processed = add_curve_to_mesh_bypass(node_mt_realize.outputs['Geometry'], -1000, 650)
 
         # 2. Geometry Proximity (山への近接距離)
         node_mt_prox = nodes.new('GeometryNodeProximity')
@@ -214,7 +215,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_mt_dom_mesh = nodes.new('GeometryNodeDomainSize')
         node_mt_dom_mesh.component = 'MESH'
         node_mt_dom_mesh.location = (-1300, 900)
-        links.new(node_mt_info.outputs['Geometry'], node_mt_dom_mesh.inputs['Geometry'])
+        links.new(node_mt_realize.outputs['Geometry'], node_mt_dom_mesh.inputs['Geometry'])
 
         try:
             node_mt_dom_curve = nodes.new('GeometryNodeAttributeDomainSize')
@@ -222,7 +223,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_mt_dom_curve = nodes.new('GeometryNodeDomainSize')
         node_mt_dom_curve.component = 'CURVE'
         node_mt_dom_curve.location = (-1300, 1050)
-        links.new(node_mt_info.outputs['Geometry'], node_mt_dom_curve.inputs['Geometry'])
+        links.new(node_mt_realize.outputs['Geometry'], node_mt_dom_curve.inputs['Geometry'])
 
         node_mt_sum = nodes.new('ShaderNodeMath')
         node_mt_sum.operation = 'ADD'
@@ -232,16 +233,11 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(mt_mesh_count, node_mt_sum.inputs[0])
         links.new(mt_curve_count, node_mt_sum.inputs[1])
 
-        try:
-            node_mt_exist = nodes.new('FunctionNodeCompare')
-            node_mt_exist.data_type = 'INT'
-            node_mt_exist.operation = 'GREATER_THAN'
-        except RuntimeError:
-            node_mt_exist = nodes.new('ShaderNodeMath')
-            node_mt_exist.operation = 'GREATER_THAN'
+        node_mt_exist = nodes.new('ShaderNodeMath')
+        node_mt_exist.operation = 'GREATER_THAN'
         node_mt_exist.location = (-900, 950)
         links.new(node_mt_sum.outputs[0], node_mt_exist.inputs[0])
-        node_mt_exist.inputs[1].default_value = 0
+        node_mt_exist.inputs[1].default_value = 0.0
 
         # 山の合計隆起高さの算出
         node_mt_mult1 = nodes.new('ShaderNodeMath')
@@ -267,8 +263,13 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_vl_info.location = (-1300, -400)
         links.new(node_in.outputs['Valley Object'], node_vl_info.inputs['Object'])
 
+        # Realize Instances
+        node_vl_realize = nodes.new('GeometryNodeRealizeInstances')
+        node_vl_realize.location = (-1150, -400)
+        links.new(node_vl_info.outputs['Geometry'], node_vl_realize.inputs['Geometry'])
+
         # 1.5. Curve to Mesh バイパス
-        vl_geometry_processed = add_curve_to_mesh_bypass(node_vl_info.outputs['Geometry'], -1100, -350)
+        vl_geometry_processed = add_curve_to_mesh_bypass(node_vl_realize.outputs['Geometry'], -1000, -350)
 
         # 2. Geometry Proximity (谷への近接距離)
         node_vl_prox = nodes.new('GeometryNodeProximity')
@@ -293,7 +294,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_vl_dom_mesh = nodes.new('GeometryNodeDomainSize')
         node_vl_dom_mesh.component = 'MESH'
         node_vl_dom_mesh.location = (-1300, -600)
-        links.new(node_vl_info.outputs['Geometry'], node_vl_dom_mesh.inputs['Geometry'])
+        links.new(node_vl_realize.outputs['Geometry'], node_vl_dom_mesh.inputs['Geometry'])
 
         try:
             node_vl_dom_curve = nodes.new('GeometryNodeAttributeDomainSize')
@@ -301,7 +302,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_vl_dom_curve = nodes.new('GeometryNodeDomainSize')
         node_vl_dom_curve.component = 'CURVE'
         node_vl_dom_curve.location = (-1300, -750)
-        links.new(node_vl_info.outputs['Geometry'], node_vl_dom_curve.inputs['Geometry'])
+        links.new(node_vl_realize.outputs['Geometry'], node_vl_dom_curve.inputs['Geometry'])
 
         node_vl_sum = nodes.new('ShaderNodeMath')
         node_vl_sum.operation = 'ADD'
@@ -311,16 +312,11 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(vl_mesh_count, node_vl_sum.inputs[0])
         links.new(vl_curve_count, node_vl_sum.inputs[1])
 
-        try:
-            node_vl_exist = nodes.new('FunctionNodeCompare')
-            node_vl_exist.data_type = 'INT'
-            node_vl_exist.operation = 'GREATER_THAN'
-        except RuntimeError:
-            node_vl_exist = nodes.new('ShaderNodeMath')
-            node_vl_exist.operation = 'GREATER_THAN'
+        node_vl_exist = nodes.new('ShaderNodeMath')
+        node_vl_exist.operation = 'GREATER_THAN'
         node_vl_exist.location = (-900, -650)
         links.new(node_vl_sum.outputs[0], node_vl_exist.inputs[0])
-        node_vl_exist.inputs[1].default_value = 0
+        node_vl_exist.inputs[1].default_value = 0.0
 
         # 谷の合計沈下量の算出
         node_vl_mult1 = nodes.new('ShaderNodeMath')
@@ -375,8 +371,13 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_road_info.location = (50, 400)
         links.new(node_in.outputs['Road Object'], node_road_info.inputs['Object'])
 
+        # Realize Instances
+        node_road_realize = nodes.new('GeometryNodeRealizeInstances')
+        node_road_realize.location = (200, 400)
+        links.new(node_road_info.outputs['Geometry'], node_road_realize.inputs['Geometry'])
+
         # 1.5. Curve to Mesh バイパス
-        road_geometry_processed = add_curve_to_mesh_bypass(node_road_info.outputs['Geometry'], 250, 450)
+        road_geometry_processed = add_curve_to_mesh_bypass(node_road_realize.outputs['Geometry'], 350, 450)
 
         # 2. Geometry Proximity (道路メッシュへの近接)
         node_proximity = nodes.new('GeometryNodeProximity')
@@ -450,7 +451,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_dom = nodes.new('GeometryNodeDomainSize')
         node_dom.component = 'MESH'
         node_dom.location = (1250, 600)
-        links.new(node_road_info.outputs['Geometry'], node_dom.inputs['Geometry'])
+        links.new(node_road_realize.outputs['Geometry'], node_dom.inputs['Geometry'])
 
         try:
             node_dom_curve = nodes.new('GeometryNodeAttributeDomainSize')
@@ -458,7 +459,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             node_dom_curve = nodes.new('GeometryNodeDomainSize')
         node_dom_curve.component = 'CURVE'
         node_dom_curve.location = (1250, 750)
-        links.new(node_road_info.outputs['Geometry'], node_dom_curve.inputs['Geometry'])
+        links.new(node_road_realize.outputs['Geometry'], node_dom_curve.inputs['Geometry'])
 
         node_dom_sum = nodes.new('ShaderNodeMath')
         node_dom_sum.operation = 'ADD'
@@ -468,16 +469,11 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(mesh_count_out, node_dom_sum.inputs[0])
         links.new(curve_count_out, node_dom_sum.inputs[1])
 
-        try:
-            node_comp_exist = nodes.new('FunctionNodeCompare')
-            node_comp_exist.data_type = 'INT'
-            node_comp_exist.operation = 'GREATER_THAN'
-        except RuntimeError:
-            node_comp_exist = nodes.new('ShaderNodeMath')
-            node_comp_exist.operation = 'GREATER_THAN'
+        node_comp_exist = nodes.new('ShaderNodeMath')
+        node_comp_exist.operation = 'GREATER_THAN'
         node_comp_exist.location = (1600, 670)
         links.new(node_dom_sum.outputs[0], node_comp_exist.inputs[0])
-        node_comp_exist.inputs[1].default_value = 0
+        node_comp_exist.inputs[1].default_value = 0.0
 
         # Switchノードで道路がある場合のみ平坦化した座標を適用
         node_switch_pos = nodes.new('GeometryNodeSwitch')
@@ -548,39 +544,24 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_normal.outputs['Normal'], node_sep_normal.inputs['Vector'])
 
         # 3. Compare: Slope Z >= 0.9 (約25度以下の傾斜)
-        try:
-            node_comp_slope = nodes.new('FunctionNodeCompare')
-            node_comp_slope.data_type = 'FLOAT'
-            node_comp_slope.operation = 'GREATER_EQUAL'
-        except RuntimeError:
-            node_comp_slope = nodes.new('ShaderNodeMath')
-            node_comp_slope.operation = 'GREATER_THAN'
+        node_comp_slope = nodes.new('ShaderNodeMath')
+        node_comp_slope.operation = 'GREATER_THAN'
         node_comp_slope.location = (1500, -350)
         links.new(node_sep_normal.outputs['Z'], node_comp_slope.inputs[0])
-        node_comp_slope.inputs[1].default_value = 0.9
+        node_comp_slope.inputs[1].default_value = 0.899
 
         # 4. 道路からの距離判定 (2.5 <= Distance <= 12.0)
-        try:
-            node_comp_dist_min = nodes.new('FunctionNodeCompare')
-            node_comp_dist_min.data_type = 'FLOAT'
-            node_comp_dist_min.operation = 'GREATER_EQUAL'
-        except RuntimeError:
-            node_comp_dist_min = nodes.new('ShaderNodeMath')
-            node_comp_dist_min.operation = 'GREATER_THAN'
+        node_comp_dist_min = nodes.new('ShaderNodeMath')
+        node_comp_dist_min.operation = 'GREATER_THAN'
         node_comp_dist_min.location = (1330, -550)
         links.new(node_proximity.outputs['Distance'], node_comp_dist_min.inputs[0])
-        node_comp_dist_min.inputs[1].default_value = 2.5
+        node_comp_dist_min.inputs[1].default_value = 2.499
 
-        try:
-            node_comp_dist_max = nodes.new('FunctionNodeCompare')
-            node_comp_dist_max.data_type = 'FLOAT'
-            node_comp_dist_max.operation = 'LESS_EQUAL'
-        except RuntimeError:
-            node_comp_dist_max = nodes.new('ShaderNodeMath')
-            node_comp_dist_max.operation = 'LESS_THAN'
+        node_comp_dist_max = nodes.new('ShaderNodeMath')
+        node_comp_dist_max.operation = 'LESS_THAN'
         node_comp_dist_max.location = (1500, -550)
         links.new(node_proximity.outputs['Distance'], node_comp_dist_max.inputs[0])
-        node_comp_dist_max.inputs[1].default_value = 12.0
+        node_comp_dist_max.inputs[1].default_value = 12.001
 
         # AND結合 (距離の範囲)
         node_and_dist = nodes.new('ShaderNodeMath')
@@ -606,5 +587,68 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         context.view_layer.objects.active = terrain_obj
         terrain_obj.select_set(True)
 
+        # 全てのノードとリンクの構築が完了した後にノードグループを割り当てる
+        # （これにより依存関係が正常にアップデートされ、オブジェクトアサイン等も正常に機能します）
+        gn_mod.node_group = group
+
         print("ジオメトリノード地形生成システムが構築されました。")
         return {'FINISHED'}
+
+
+# オペレータ スプライン山脈生成
+class MYADDON_OT_create_mountain_along_spline(bpy.types.Operator):
+    bl_idname = "myaddon.myaddon_ot_create_mountain_along_spline"
+    bl_label = "スプライン山脈生成"
+    bl_description = "山脈の起伏を生成するためのスプライン曲線を生成し、地形にアサインします"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        # 1. 山脈用のスプライン(POLY)を作成
+        curve_data = bpy.data.curves.new("MountainPath", 'CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.twist_mode = 'Z_UP'
+
+        spline = curve_data.splines.new('POLY')
+        spline.points.add(1)  # デフォルトで1点あるので、計2点にする
+        spline.points[0].co = (-20.0, 20.0, 0.0, 1.0)
+        spline.points[1].co = (20.0, 20.0, 0.0, 1.0)
+
+        curve_obj = bpy.data.objects.new("MountainPath", curve_data)
+        context.collection.objects.link(curve_obj)
+
+        # アクティブを新しく作ったカーブにして、編集しやすくする
+        context.view_layer.objects.active = curve_obj
+        curve_obj.select_set(True)
+
+        print("スプライン山脈を生成しました。")
+        return {'FINISHED'}
+
+
+# オペレータ スプライン谷生成
+class MYADDON_OT_create_valley_along_spline(bpy.types.Operator):
+    bl_idname = "myaddon.myaddon_ot_create_valley_along_spline"
+    bl_label = "スプライン谷生成"
+    bl_description = "谷の起伏を生成するためのスプライン曲線を生成し、地形にアサインします"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        # 1. 谷用のスプライン(POLY)を作成
+        curve_data = bpy.data.curves.new("ValleyPath", 'CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.twist_mode = 'Z_UP'
+
+        spline = curve_data.splines.new('POLY')
+        spline.points.add(1)  # デフォルトで1点あるので、計2点にする
+        spline.points[0].co = (-20.0, -20.0, 0.0, 1.0)
+        spline.points[1].co = (20.0, -20.0, 0.0, 1.0)
+
+        curve_obj = bpy.data.objects.new("ValleyPath", curve_data)
+        context.collection.objects.link(curve_obj)
+
+        # アクティブを新しく作ったカーブにして、編集しやすくする
+        context.view_layer.objects.active = curve_obj
+        curve_obj.select_set(True)
+
+        print("スプライン谷を生成しました。")
+        return {'FINISHED'}
+

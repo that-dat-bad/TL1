@@ -8,8 +8,8 @@ from .export_scene import MYADDON_OT_export_scene
 from .collider import MYADDON_OT_add_collider, OBJECT_PT_collider, DrawCollider, register_draw_handler, unregister_draw_handler
 from .file_name import MYADDON_OT_add_filename, OBJECT_PT_file_name
 from .create_road import MYADDON_OT_create_road_along_spline
-from .create_terrain import MYADDON_OT_create_terrain
-from .menu import TOPBAR_MT_my_menu
+from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
+from .menu import TOPBAR_MT_my_menu, TOPBAR_MT_terrain
 from .disabled import MYADDON_OT_disable_operator, OBJECT_PT_disabled
 from .console_setup import setup_console_encoding
 
@@ -39,13 +39,16 @@ classes = [
     MYADDON_OT_create_ico_sphere,#済み
     MYADDON_OT_create_road_along_spline,#済み
     MYADDON_OT_create_terrain,#済み
+    MYADDON_OT_create_mountain_along_spline,
+    MYADDON_OT_create_valley_along_spline,
     MYADDON_OT_export_scene,#済み
     MYADDON_OT_add_filename,#済み
     OBJECT_PT_file_name,#済み
     MYADDON_OT_add_collider,#済み
     OBJECT_PT_collider,#済み
     MYADDON_OT_disable_operator,#済み
-    OBJECT_PT_disabled#済み
+    OBJECT_PT_disabled,#済み
+    TOPBAR_MT_terrain#済み
 ]
 
 
@@ -55,6 +58,7 @@ def register():
         bpy.utils.register_class(cls)
     #メニューに項目を追加
     bpy.types.TOPBAR_MT_editor_menus.append(TOPBAR_MT_my_menu.submenu)
+    bpy.types.TOPBAR_MT_editor_menus.append(TOPBAR_MT_terrain.submenu)
     
     #描画ハンドルの登録
     register_draw_handler()
@@ -64,6 +68,7 @@ def register():
 
 # Add-On無効化時コールバック
 def unregister():
+    bpy.types.TOPBAR_MT_editor_menus.remove(TOPBAR_MT_terrain.submenu)
     bpy.types.TOPBAR_MT_editor_menus.remove(TOPBAR_MT_my_menu.submenu)
     #描画ハンドルの解除
     unregister_draw_handler()
