@@ -1,6 +1,7 @@
 import bpy
 from .vertex_stretch import MYADDON_OT_strech_vertex
 from .create_ico_sphere import MYADDON_OT_create_ico_sphere
+from .create_building import MYADDON_OT_create_building
 from .export_scene import MYADDON_OT_export_scene
 from .create_road import MYADDON_OT_create_road_along_spline
 from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
@@ -17,6 +18,8 @@ class TOPBAR_MT_my_menu(bpy.types.Menu):
         self.layout.operator(MYADDON_OT_strech_vertex.bl_idname, text=MYADDON_OT_strech_vertex.bl_label)
         self.layout.separator()
         self.layout.operator(MYADDON_OT_create_ico_sphere.bl_idname, text=MYADDON_OT_create_ico_sphere.bl_label)
+        self.layout.separator()
+        self.layout.operator(MYADDON_OT_create_building.bl_idname, text=MYADDON_OT_create_building.bl_label)
         self.layout.separator()
         self.layout.operator(MYADDON_OT_export_scene.bl_idname, text=MYADDON_OT_export_scene.bl_label)
 

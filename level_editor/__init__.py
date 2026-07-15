@@ -9,6 +9,7 @@ from .collider import MYADDON_OT_add_collider, OBJECT_PT_collider, DrawCollider,
 from .file_name import MYADDON_OT_add_filename, OBJECT_PT_file_name
 from .create_road import MYADDON_OT_create_road_along_spline
 from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
+from .create_building import MYADDON_OT_create_building
 from .menu import TOPBAR_MT_my_menu, TOPBAR_MT_terrain
 from .disabled import MYADDON_OT_disable_operator, OBJECT_PT_disabled
 from .console_setup import setup_console_encoding
@@ -41,6 +42,7 @@ classes = [
     MYADDON_OT_create_terrain,#済み
     MYADDON_OT_create_mountain_along_spline,
     MYADDON_OT_create_valley_along_spline,
+    MYADDON_OT_create_building,
     MYADDON_OT_export_scene,#済み
     MYADDON_OT_add_filename,#済み
     OBJECT_PT_file_name,#済み
