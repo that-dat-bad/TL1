@@ -210,8 +210,8 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
         # Curve to Points でポイントクラウド化し、サンプリングを確実に動作させる
         node_mt_c2p = nodes.new('GeometryNodeCurveToPoints')
-        node_mt_c2p.mode = 'COUNT'
-        node_mt_c2p.inputs['Count'].default_value = 20
+        node_mt_c2p.mode = 'LENGTH'
+        node_mt_c2p.inputs['Length'].default_value = 5.0
         node_mt_c2p.location = (-850, 800)
         links.new(node_mt_store_tilt.outputs['Geometry'], node_mt_c2p.inputs['Curve'])
 
@@ -369,8 +369,8 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
         # Curve to Points でポイントクラウド化し、サンプリングを確実に動作させる
         node_vl_c2p = nodes.new('GeometryNodeCurveToPoints')
-        node_vl_c2p.mode = 'COUNT'
-        node_vl_c2p.inputs['Count'].default_value = 20
+        node_vl_c2p.mode = 'LENGTH'
+        node_vl_c2p.inputs['Length'].default_value = 5.0
         node_vl_c2p.location = (-850, -100)
         links.new(node_vl_store_tilt.outputs['Geometry'], node_vl_c2p.inputs['Curve'])
 
