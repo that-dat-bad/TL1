@@ -7,7 +7,7 @@ from .create_ico_sphere import MYADDON_OT_create_ico_sphere
 from .export_scene import MYADDON_OT_export_scene
 from .collider import MYADDON_OT_add_collider, OBJECT_PT_collider, DrawCollider, register_draw_handler, unregister_draw_handler
 from .file_name import MYADDON_OT_add_filename, OBJECT_PT_file_name
-from .create_road import MYADDON_OT_create_road_along_spline
+from .create_road import MYADDON_OT_create_road_along_spline, MYADDON_OT_add_road_intersection
 from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
 from .create_building import MYADDON_OT_create_building
 from .menu import TOPBAR_MT_my_menu, TOPBAR_MT_terrain
@@ -39,6 +39,7 @@ classes = [
     MYADDON_OT_strech_vertex,#済み
     MYADDON_OT_create_ico_sphere,#済み
     MYADDON_OT_create_road_along_spline,#済み
+    MYADDON_OT_add_road_intersection,
     MYADDON_OT_create_terrain,#済み
     MYADDON_OT_create_mountain_along_spline,
     MYADDON_OT_create_valley_along_spline,
