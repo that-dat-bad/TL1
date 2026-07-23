@@ -28,14 +28,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             # Grid Dimensions
             group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
             group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
-            sub_x = group.interface.new_socket('Subdivisions X', in_out='INPUT', socket_type='NodeSocketInt')
-            sub_x.default_value = 10
-            sub_x.min_value = 2
-            sub_x.max_value = 1000
-            sub_y = group.interface.new_socket('Subdivisions Y', in_out='INPUT', socket_type='NodeSocketInt')
-            sub_y.default_value = 10
-            sub_y.min_value = 2
-            sub_y.max_value = 1000
+
             # Height and Noise Settings
             group.interface.new_socket('Noise Scale', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 0.05
             group.interface.new_socket('Terrain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 10.0
@@ -63,8 +56,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.inputs.new('NodeSocketCollection', 'Valley Collection')
             group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 200.0
             group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 200.0
-            group.inputs.new('NodeSocketInt', 'Subdivisions X').default_value = 10
-            group.inputs.new('NodeSocketInt', 'Subdivisions Y').default_value = 10
+
             group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = 0.05
             group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = 10.0
             group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = 15.0
@@ -144,8 +136,78 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_grid.location = (-1300, 200)
         links.new(node_in.outputs['Grid Size X'], node_grid.inputs['Size X'])
         links.new(node_in.outputs['Grid Size Y'], node_grid.inputs['Size Y'])
-        links.new(node_in.outputs['Subdivisions X'], node_grid.inputs['Vertices X'])
-        links.new(node_in.outputs['Subdivisions Y'], node_grid.inputs['Vertices Y'])
+        # Is Viewport ノード (ビューポートでのみ分割数を減らして動作を軽くする)
+        try:
+            node_is_viewport = nodes.new('GeometryNodeIsViewport')
+        except RuntimeError:
+            # 古いBlenderバージョン用のフォールバック（存在しない場合は常にフル解像度）
+            node_is_viewport = None
+
+        # ビューポート時の分割数計算 (Grid Size / 4)
+        math_div_x = nodes.new('ShaderNodeMath')
+        math_div_x.operation = 'DIVIDE'
+        math_div_x.inputs[1].default_value = 4.0
+        links.new(node_in.outputs['Grid Size X'], math_div_x.inputs[0])
+
+        math_div_y = nodes.new('ShaderNodeMath')
+        math_div_y.operation = 'DIVIDE'
+        math_div_y.inputs[1].default_value = 4.0
+        links.new(node_in.outputs['Grid Size Y'], math_div_y.inputs[0])
+
+        # スイッチノード (Viewport なら /4、Render なら そのまま)
+        switch_res_x = nodes.new('GeometryNodeSwitch')
+        try:
+            switch_res_x.input_type = 'FLOAT'
+        except AttributeError:
+            pass # 3.x compatibility
+        if node_is_viewport:
+            links.new(node_is_viewport.outputs[0], switch_res_x.inputs[0])
+        links.new(node_in.outputs['Grid Size X'], switch_res_x.inputs['False'])
+        links.new(math_div_x.outputs[0], switch_res_x.inputs['True'])
+
+        switch_res_y = nodes.new('GeometryNodeSwitch')
+        try:
+            switch_res_y.input_type = 'FLOAT'
+        except AttributeError:
+            pass
+        if node_is_viewport:
+            links.new(node_is_viewport.outputs[0], switch_res_y.inputs[0])
+        links.new(node_in.outputs['Grid Size Y'], switch_res_y.inputs['False'])
+        links.new(math_div_y.outputs[0], switch_res_y.inputs['True'])
+
+        # X方向の分割数計算: max(floor(Size) + 1, 2)
+        math_floor_x = nodes.new('ShaderNodeMath')
+        math_floor_x.operation = 'FLOOR'
+        links.new(switch_res_x.outputs['Output'] if 'Output' in switch_res_x.outputs else switch_res_x.outputs[0], math_floor_x.inputs[0])
+        
+        math_add_x = nodes.new('ShaderNodeMath')
+        math_add_x.operation = 'ADD'
+        math_add_x.inputs[1].default_value = 1.0
+        links.new(math_floor_x.outputs[0], math_add_x.inputs[0])
+        
+        math_max_x = nodes.new('ShaderNodeMath')
+        math_max_x.operation = 'MAXIMUM'
+        math_max_x.inputs[1].default_value = 2.0
+        links.new(math_add_x.outputs[0], math_max_x.inputs[0])
+        
+        links.new(math_max_x.outputs[0], node_grid.inputs['Vertices X'])
+
+        # Y方向の分割数計算: max(floor(Size) + 1, 2)
+        math_floor_y = nodes.new('ShaderNodeMath')
+        math_floor_y.operation = 'FLOOR'
+        links.new(switch_res_y.outputs['Output'] if 'Output' in switch_res_y.outputs else switch_res_y.outputs[0], math_floor_y.inputs[0])
+        
+        math_add_y = nodes.new('ShaderNodeMath')
+        math_add_y.operation = 'ADD'
+        math_add_y.inputs[1].default_value = 1.0
+        links.new(math_floor_y.outputs[0], math_add_y.inputs[0])
+        
+        math_max_y = nodes.new('ShaderNodeMath')
+        math_max_y.operation = 'MAXIMUM'
+        math_max_y.inputs[1].default_value = 2.0
+        links.new(math_add_y.outputs[0], math_max_y.inputs[0])
+        
+        links.new(math_max_y.outputs[0], node_grid.inputs['Vertices Y'])
 
         # 1. Position ノード
         node_pos = nodes.new('GeometryNodeInputPosition')
@@ -572,12 +634,19 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_add_blend.outputs[0], node_map_range.inputs['From Max'])
 
         # 6. 線形補間(Lerp)の計算 (Mix Float ノードの互換性対策)
-        # MixZ = CurrZ + (ProxZ - CurrZ) * Factor
-        # (A) ProxZ - CurrZ
+        # Z-fightingおよび道路が埋まるのを防ぐため、道路より地形を0.1m下げる
+        node_offset_z = nodes.new('ShaderNodeMath')
+        node_offset_z.operation = 'SUBTRACT'
+        node_offset_z.location = (1000, 400)
+        links.new(node_sep_prox.outputs['Z'], node_offset_z.inputs[0])
+        node_offset_z.inputs[1].default_value = 0.1
+
+        # MixZ = CurrZ + ((ProxZ - 0.1) - CurrZ) * Factor
+        # (A) (ProxZ - 0.1) - CurrZ
         node_diff = nodes.new('ShaderNodeMath')
         node_diff.operation = 'SUBTRACT'
-        node_diff.location = (1100, 400)
-        links.new(node_sep_prox.outputs['Z'], node_diff.inputs[0])
+        node_diff.location = (1150, 400)
+        links.new(node_offset_z.outputs[0], node_diff.inputs[0])
         links.new(node_sep_curr.outputs['Z'], node_diff.inputs[1])
 
         # (B) (ProxZ - CurrZ) * Factor
@@ -771,10 +840,14 @@ class MYADDON_OT_create_mountain_along_spline(bpy.types.Operator):
         curve_data.dimensions = '3D'
         curve_data.twist_mode = 'Z_UP'
 
-        spline = curve_data.splines.new('POLY')
-        spline.points.add(1)  # デフォルトで1点あるので、計2点にする
-        spline.points[0].co = (-20.0, 20.0, 0.0, 1.0)
-        spline.points[1].co = (20.0, 20.0, 0.0, 1.0)
+        spline = curve_data.splines.new('BEZIER')
+        spline.bezier_points.add(1)  # デフォルトで1点あるので、計2点にする
+        spline.bezier_points[0].co = (-20.0, 20.0, 0.0)
+        spline.bezier_points[0].handle_left_type = 'AUTO'
+        spline.bezier_points[0].handle_right_type = 'AUTO'
+        spline.bezier_points[1].co = (20.0, 20.0, 0.0)
+        spline.bezier_points[1].handle_left_type = 'AUTO'
+        spline.bezier_points[1].handle_right_type = 'AUTO'
 
         curve_obj = bpy.data.objects.new("MountainPath", curve_data)
         mountain_col.objects.link(curve_obj)
@@ -806,10 +879,14 @@ class MYADDON_OT_create_valley_along_spline(bpy.types.Operator):
         curve_data.dimensions = '3D'
         curve_data.twist_mode = 'Z_UP'
 
-        spline = curve_data.splines.new('POLY')
-        spline.points.add(1)  # デフォルトで1点あるので、計2点にする
-        spline.points[0].co = (-20.0, -20.0, 0.0, 1.0)
-        spline.points[1].co = (20.0, -20.0, 0.0, 1.0)
+        spline = curve_data.splines.new('BEZIER')
+        spline.bezier_points.add(1)  # デフォルトで1点あるので、計2点にする
+        spline.bezier_points[0].co = (-20.0, -20.0, 0.0)
+        spline.bezier_points[0].handle_left_type = 'AUTO'
+        spline.bezier_points[0].handle_right_type = 'AUTO'
+        spline.bezier_points[1].co = (20.0, -20.0, 0.0)
+        spline.bezier_points[1].handle_left_type = 'AUTO'
+        spline.bezier_points[1].handle_right_type = 'AUTO'
 
         curve_obj = bpy.data.objects.new("ValleyPath", curve_data)
         valley_col.objects.link(curve_obj)

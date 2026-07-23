@@ -4,7 +4,7 @@ import bpy  # type: ignore
 #分離モジュールのインポート
 from .vertex_stretch import MYADDON_OT_strech_vertex
 from .create_ico_sphere import MYADDON_OT_create_ico_sphere
-from .export_scene import MYADDON_OT_export_scene
+from .export_scene import MYADDON_OT_export_scene, MYADDON_OT_export_chunks
 from .collider import MYADDON_OT_add_collider, OBJECT_PT_collider, DrawCollider, register_draw_handler, unregister_draw_handler
 from .file_name import MYADDON_OT_add_filename, OBJECT_PT_file_name
 from .create_road import MYADDON_OT_create_road_along_spline, MYADDON_OT_add_road_intersection
@@ -13,6 +13,7 @@ from .create_building import MYADDON_OT_create_building
 from .menu import TOPBAR_MT_my_menu, TOPBAR_MT_terrain
 from .disabled import MYADDON_OT_disable_operator, OBJECT_PT_disabled
 from .console_setup import setup_console_encoding
+from .ai_terrain import MYADDON_OT_ai_generate_terrain
 
 
 setup_console_encoding()# Windows文字化け対策（エンコード設定）を実行
@@ -45,13 +46,15 @@ classes = [
     MYADDON_OT_create_valley_along_spline,
     MYADDON_OT_create_building,
     MYADDON_OT_export_scene,#済み
+    MYADDON_OT_export_chunks,
     MYADDON_OT_add_filename,#済み
     OBJECT_PT_file_name,#済み
     MYADDON_OT_add_collider,#済み
     OBJECT_PT_collider,#済み
     MYADDON_OT_disable_operator,#済み
     OBJECT_PT_disabled,#済み
-    TOPBAR_MT_terrain#済み
+    TOPBAR_MT_terrain,#済み
+    MYADDON_OT_ai_generate_terrain
 ]
 
 

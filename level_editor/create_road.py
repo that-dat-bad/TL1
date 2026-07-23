@@ -141,8 +141,8 @@ class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
         # 道路本体 (Curve to Mesh)
         curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
         profile_line = nodes.new('GeometryNodeCurvePrimitiveLine')
-        profile_line.inputs['Start'].default_value = (-total_width / 2.0, 0, 0)
-        profile_line.inputs['End'].default_value = (total_width / 2.0, 0, 0)
+        profile_line.inputs['Start'].default_value = (total_width / 2.0, 0, 0)
+        profile_line.inputs['End'].default_value = (-total_width / 2.0, 0, 0)
 
         links.new(set_radius.outputs[0], curve_to_mesh.inputs['Curve'])
         links.new(profile_line.outputs[0], curve_to_mesh.inputs['Profile Curve'])
@@ -169,8 +169,8 @@ class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
         join_profiles = nodes.new('GeometryNodeJoinGeometry')
         for pos in marking_positions:
             ln = nodes.new('GeometryNodeCurvePrimitiveLine')
-            ln.inputs['Start'].default_value = (pos - line_w / 2.0, z_up, 0)
-            ln.inputs['End'].default_value   = (pos + line_w / 2.0, z_up, 0)
+            ln.inputs['Start'].default_value = (pos + line_w / 2.0, 0, 0)
+            ln.inputs['End'].default_value   = (pos - line_w / 2.0, 0, 0)
             links.new(ln.outputs[0], join_profiles.inputs['Geometry'])
 
         # 車線マーキングメッシュを生成
@@ -178,25 +178,26 @@ class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
         links.new(set_radius.outputs[0], curve_to_mesh_lines.inputs['Curve'])
         links.new(join_profiles.outputs[0], curve_to_mesh_lines.inputs['Profile Curve'])
 
+        # マーキングをZ+方向に直接移動（オフセットの確実な適用）
+        transform_lines = nodes.new('GeometryNodeTransform')
+        transform_lines.inputs['Translation'].default_value = (0, 0, z_up)
+        links.new(curve_to_mesh_lines.outputs[0], transform_lines.inputs['Geometry'])
+
         # マーキングにマテリアルを割り当て
         set_mat_line = nodes.new('GeometryNodeSetMaterial')
         set_mat_line.inputs['Material'].default_value = mat_line
-        links.new(curve_to_mesh_lines.outputs[0], set_mat_line.inputs['Geometry'])
+        links.new(transform_lines.outputs[0], set_mat_line.inputs['Geometry'])
 
         # 道路面とマーキングを結合
         join_all = nodes.new('GeometryNodeJoinGeometry')
         links.new(set_mat_road.outputs[0], join_all.inputs['Geometry'])
         links.new(set_mat_line.outputs[0], join_all.inputs['Geometry'])
 
-        # 法線を反転してZ+方向（上面）に向ける
-        flip = nodes.new('GeometryNodeFlipFaces')
-        links.new(join_all.outputs[0], flip.inputs['Mesh'])
-
         # 重なった頂点を自動マージ（角・分岐点のZ-fighting軽減）
         merge = nodes.new('GeometryNodeMergeByDistance')
         merge.inputs['Distance'].default_value = 0.001
 
-        links.new(flip.outputs[0], merge.inputs['Geometry'])
+        links.new(join_all.outputs[0], merge.inputs['Geometry'])
         links.new(merge.outputs[0], node_out.inputs[0])
         
         # アクティブオブジェクトをメインのカーブに戻す
