@@ -380,7 +380,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         # --- Procedural City Generation (Step 1: Road Growth) ---
         if roads:
             try:
-                from .city_generator import ProceduralCityGenerator
+                from level_editor_city.city_generator import ProceduralCityGenerator
                 self._generator = ProceduralCityGenerator(
                     terrain_size_x=terrain_data.get("terrain_size_x", 200.0),
                     terrain_size_y=terrain_data.get("terrain_size_y", 200.0)
