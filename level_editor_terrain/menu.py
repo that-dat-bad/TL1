@@ -1,6 +1,7 @@
 import bpy
 from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
 from .ai_terrain import MYADDON_OT_ai_generate_terrain
+from .mcp_server import MYADDON_OT_start_mcp_server, MYADDON_OT_stop_mcp_server
 
 class TOPBAR_MT_terrain_menu(bpy.types.Menu):
     bl_idname = "TOPBAR_MT_terrain_menu"
@@ -15,6 +16,11 @@ class TOPBAR_MT_terrain_menu(bpy.types.Menu):
         self.layout.operator(MYADDON_OT_create_valley_along_spline.bl_idname, text=MYADDON_OT_create_valley_along_spline.bl_label)
         self.layout.separator()
         self.layout.operator(MYADDON_OT_ai_generate_terrain.bl_idname, text=MYADDON_OT_ai_generate_terrain.bl_label)
+        self.layout.separator()
+        self.layout.separator()
+        self.layout.label(text="MCP連携", icon='LINKED')
+        self.layout.operator(MYADDON_OT_start_mcp_server.bl_idname, text=MYADDON_OT_start_mcp_server.bl_label, icon='PLAY')
+        self.layout.operator(MYADDON_OT_stop_mcp_server.bl_idname, text=MYADDON_OT_stop_mcp_server.bl_label, icon='PAUSE')
 
     def submenu(self, context):
         self.layout.menu(TOPBAR_MT_terrain_menu.bl_idname)
