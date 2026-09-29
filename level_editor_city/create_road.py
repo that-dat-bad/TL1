@@ -1,13 +1,368 @@
 import bpy
 import mathutils
 import math
+import os
+import sys
+
+# マテリアルヘルパーのインポート（terrain_materials との連携）
+def get_or_create_road_material_helper(road_type='ASPHALT'):
+    """道路マテリアルを取得または作成（ASPHALT, GRAVEL, SAND_DIRT）"""
+    try:
+        from level_editor_terrain.terrain_materials import get_or_create_road_material
+        return get_or_create_road_material(road_type)
+    except Exception:
+        pass
+    
+    # フォールバック処理
+    mat_name = f"Road_Material_{road_type}" if road_type != 'ASPHALT' else "Road_Asphalt"
+    mat = bpy.data.materials.get(mat_name)
+    if mat:
+        return mat
+    mat = bpy.data.materials.new(mat_name)
+    mat.use_nodes = True
+    if road_type == 'SAND_DIRT':
+        col = (0.80, 0.64, 0.40, 1.0)
+    elif road_type == 'GRAVEL':
+        col = (0.52, 0.48, 0.42, 1.0)
+    else:
+        col = (0.12, 0.12, 0.12, 1.0)
+    mat.diffuse_color = col
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = col
+        bsdf.inputs["Roughness"].default_value = 0.85
+    return mat
+
+
+def setup_road_geometry_nodes(curve_obj, road_type='ASPHALT', lane_count=2, lane_width=1.0, line_width=0.08):
+    """
+    スプラインカーブオブジェクトに道路生成 Geometry Nodes (RoadGen) を構築・適用します。
+    - ASPHALT: 道路面 + 白線車線マーキング + フィレット
+    - GRAVEL / SAND_DIRT: 砂利道・砂道マテリアル + フィレット（未舗装のため白線なし）
+    """
+    total_width = lane_count * lane_width
+
+    mat_road = get_or_create_road_material_helper(road_type)
+    mat_line = None
+    if road_type == 'ASPHALT':
+        mat_line = bpy.data.materials.get("Road_LaneLine")
+        if mat_line is None:
+            mat_line = bpy.data.materials.new("Road_LaneLine")
+            mat_line.use_nodes = True
+            mat_line.diffuse_color = (0.95, 0.95, 0.95, 1.0)
+            bsdf = mat_line.node_tree.nodes.get("Principled BSDF")
+            if bsdf:
+                bsdf.inputs["Base Color"].default_value = (0.95, 0.95, 0.95, 1.0)
+                bsdf.inputs["Roughness"].default_value = 0.5
+
+    # マテリアルスロット更新
+    curve_obj.data.materials.clear()
+    curve_obj.data.materials.append(mat_road)
+    if mat_line:
+        curve_obj.data.materials.append(mat_line)
+
+    # Geometry Nodes モディファイア
+    gn_mod = curve_obj.modifiers.get("RoadGen")
+    if not gn_mod:
+        gn_mod = curve_obj.modifiers.new(name="RoadGen", type='NODES')
+    group = bpy.data.node_groups.new(f"RoadGenTree_{road_type}", 'GeometryNodeTree')
+    gn_mod.node_group = group
+
+    if hasattr(group, "interface"):
+        group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+        group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    else:
+        group.inputs.new('NodeSocketGeometry', 'Geometry')
+        group.outputs.new('NodeSocketGeometry', 'Geometry')
+
+    nodes = group.nodes
+    links = group.links
+
+    node_in = nodes.new('NodeGroupInput')
+    node_out = nodes.new('NodeGroupOutput')
+    node_in.location = (-600, 0)
+    node_out.location = (800, 0)
+
+    # Fillet Curve
+    fillet_curve = nodes.new('GeometryNodeFilletCurve')
+    fillet_curve.mode = 'POLY'
+    fillet_curve.inputs['Count'].default_value = 16
+    fillet_curve.inputs['Limit Radius'].default_value = True
+    fillet_curve.location = (-400, 100)
+
+    base_radius = nodes.new('ShaderNodeValue')
+    base_radius.outputs[0].default_value = total_width * 1.0
+    base_radius.location = (-600, 200)
+
+    radius_attr = nodes.new('GeometryNodeInputRadius')
+    radius_attr.location = (-600, 300)
+
+    multiply = nodes.new('ShaderNodeMath')
+    multiply.operation = 'MULTIPLY'
+    multiply.location = (-450, 250)
+    links.new(base_radius.outputs[0], multiply.inputs[0])
+    links.new(radius_attr.outputs[0], multiply.inputs[1])
+    links.new(multiply.outputs[0], fillet_curve.inputs['Radius'])
+    links.new(node_in.outputs[0], fillet_curve.inputs['Curve'])
+
+    # Set Radius
+    set_radius = nodes.new('GeometryNodeSetCurveRadius')
+    set_radius.inputs['Radius'].default_value = 1.0
+    set_radius.location = (-250, 100)
+    links.new(fillet_curve.outputs[0], set_radius.inputs['Curve'])
+
+    # Curve to Mesh (道路面)
+    curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
+    curve_to_mesh.location = (-50, 100)
+    profile_line = nodes.new('GeometryNodeCurvePrimitiveLine')
+    profile_line.inputs['Start'].default_value = (total_width / 2.0, 0, 0)
+    profile_line.inputs['End'].default_value = (-total_width / 2.0, 0, 0)
+    profile_line.location = (-250, -50)
+    links.new(set_radius.outputs[0], curve_to_mesh.inputs['Curve'])
+    links.new(profile_line.outputs[0], curve_to_mesh.inputs['Profile Curve'])
+
+    # 道路面を地面から確実に浮かせる (Z +0.20m)
+    transform_road = nodes.new('GeometryNodeTransform')
+    transform_road.inputs['Translation'].default_value = (0, 0, 0.20)
+    transform_road.location = (150, 100)
+    links.new(curve_to_mesh.outputs[0], transform_road.inputs['Geometry'])
+
+    set_mat_road = nodes.new('GeometryNodeSetMaterial')
+    set_mat_road.inputs['Material'].default_value = mat_road
+    set_mat_road.location = (300, 100)
+    links.new(transform_road.outputs[0], set_mat_road.inputs['Geometry'])
+
+    if road_type == 'ASPHALT' and mat_line:
+        # 白線マーキング
+        marking_positions = []
+        marking_positions.append(-total_width / 2.0 + line_width / 2.0)
+        marking_positions.append( total_width / 2.0 - line_width / 2.0)
+        for i in range(1, lane_count):
+            marking_positions.append(-total_width / 2.0 + i * lane_width)
+
+        join_profiles = nodes.new('GeometryNodeJoinGeometry')
+        join_profiles.location = (-50, -200)
+        for pos in marking_positions:
+            ln = nodes.new('GeometryNodeCurvePrimitiveLine')
+            ln.inputs['Start'].default_value = (pos + line_width / 2.0, 0, 0)
+            ln.inputs['End'].default_value   = (pos - line_width / 2.0, 0, 0)
+            links.new(ln.outputs[0], join_profiles.inputs['Geometry'])
+
+        curve_to_mesh_lines = nodes.new('GeometryNodeCurveToMesh')
+        curve_to_mesh_lines.location = (150, -200)
+        links.new(set_radius.outputs[0], curve_to_mesh_lines.inputs['Curve'])
+        links.new(join_profiles.outputs[0], curve_to_mesh_lines.inputs['Profile Curve'])
+
+        # 白線を道路面よりさらに8mm浮かせる (Z +0.208m)
+        transform_lines = nodes.new('GeometryNodeTransform')
+        transform_lines.inputs['Translation'].default_value = (0, 0, 0.208)
+        transform_lines.location = (300, -200)
+        links.new(curve_to_mesh_lines.outputs[0], transform_lines.inputs['Geometry'])
+
+        set_mat_line = nodes.new('GeometryNodeSetMaterial')
+        set_mat_line.inputs['Material'].default_value = mat_line
+        set_mat_line.location = (450, -200)
+        links.new(transform_lines.outputs[0], set_mat_line.inputs['Geometry'])
+
+        join_all = nodes.new('GeometryNodeJoinGeometry')
+        join_all.location = (550, 0)
+        links.new(set_mat_road.outputs[0], join_all.inputs['Geometry'])
+        links.new(set_mat_line.outputs[0], join_all.inputs['Geometry'])
+        last_geom = join_all.outputs[0]
+    else:
+        last_geom = set_mat_road.outputs[0]
+
+    merge = nodes.new('GeometryNodeMergeByDistance')
+    merge.inputs['Distance'].default_value = 0.001
+    merge.location = (700, 0)
+    links.new(last_geom, merge.inputs['Geometry'])
+    links.new(merge.outputs[0], node_out.inputs[0])
+
+    return gn_mod
+
+
+def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary_type='SAND_DIRT',
+                                    main_width=24.0, sub_width=12.0, main_lanes=4, line_width=0.15):
+    """
+    幹線道路（アスファルト＋白線）と街路・小道（砂道または砂利道）を
+    スプラインの radius 属性 (幹線 > 0.75, 街路 <= 0.75) に応じて1つのオブジェクト内で混在生成します。
+    """
+    mat_main = get_or_create_road_material_helper(primary_type)
+    mat_sub = get_or_create_road_material_helper(secondary_type)
+    mat_line = bpy.data.materials.get("Road_LaneLine")
+    if mat_line is None:
+        mat_line = bpy.data.materials.new("Road_LaneLine")
+        mat_line.use_nodes = True
+        mat_line.diffuse_color = (0.95, 0.95, 0.95, 1.0)
+        bsdf = mat_line.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            bsdf.inputs["Base Color"].default_value = (0.95, 0.95, 0.95, 1.0)
+            bsdf.inputs["Roughness"].default_value = 0.5
+
+    curve_obj.data.materials.clear()
+    curve_obj.data.materials.append(mat_main)
+    curve_obj.data.materials.append(mat_line)
+    curve_obj.data.materials.append(mat_sub)
+
+    gn_mod = curve_obj.modifiers.get("RoadGen")
+    if not gn_mod:
+        gn_mod = curve_obj.modifiers.new(name="RoadGen", type='NODES')
+    group = bpy.data.node_groups.new("RoadGenTree_Mixed", 'GeometryNodeTree')
+    gn_mod.node_group = group
+
+    if hasattr(group, "interface"):
+        group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+        group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    else:
+        group.inputs.new('NodeSocketGeometry', 'Geometry')
+        group.outputs.new('NodeSocketGeometry', 'Geometry')
+
+    nodes = group.nodes
+    links = group.links
+
+    node_in = nodes.new('NodeGroupInput')
+    node_out = nodes.new('NodeGroupOutput')
+    node_in.location = (-1000, 0)
+    node_out.location = (1100, 0)
+
+    # 1. 頂点Radiusによる幹線と街路の分離 (radius > 0.75 -> 幹線)
+    radius_attr = nodes.new('GeometryNodeInputRadius')
+    radius_attr.location = (-900, 300)
+
+    compare_node = nodes.new('ShaderNodeMath')
+    compare_node.operation = 'GREATER_THAN'
+    compare_node.location = (-750, 300)
+    compare_node.inputs[1].default_value = 0.75
+    links.new(radius_attr.outputs[0], compare_node.inputs[0])
+
+    sep_geom = nodes.new('GeometryNodeSeparateGeometry')
+    sep_geom.location = (-550, 0)
+    links.new(node_in.outputs['Geometry'], sep_geom.inputs['Geometry'])
+    links.new(compare_node.outputs[0], sep_geom.inputs['Selection'])
+
+    # 2. 幹線（Selection: radius > 0.75）の処理
+    fillet_main = nodes.new('GeometryNodeFilletCurve')
+    fillet_main.mode = 'POLY'
+    fillet_main.inputs['Count'].default_value = 16
+    fillet_main.inputs['Limit Radius'].default_value = True
+    fillet_main.inputs['Radius'].default_value = main_width * 0.8
+    fillet_main.location = (-350, 200)
+    links.new(sep_geom.outputs['Selection'], fillet_main.inputs['Curve'])
+
+    curve_to_mesh_main = nodes.new('GeometryNodeCurveToMesh')
+    curve_to_mesh_main.location = (-100, 200)
+    prof_line_main = nodes.new('GeometryNodeCurvePrimitiveLine')
+    prof_line_main.inputs['Start'].default_value = (main_width / 2.0, 0, 0)
+    prof_line_main.inputs['End'].default_value = (-main_width / 2.0, 0, 0)
+    prof_line_main.location = (-300, 50)
+    links.new(fillet_main.outputs[0], curve_to_mesh_main.inputs['Curve'])
+    links.new(prof_line_main.outputs[0], curve_to_mesh_main.inputs['Profile Curve'])
+
+    # 幹線道路面を地面から確実に浮かせる (Z +0.22m)
+    transform_road_main = nodes.new('GeometryNodeTransform')
+    transform_road_main.inputs['Translation'].default_value = (0, 0, 0.22)
+    transform_road_main.location = (50, 200)
+    links.new(curve_to_mesh_main.outputs[0], transform_road_main.inputs['Geometry'])
+
+    set_mat_main = nodes.new('GeometryNodeSetMaterial')
+    set_mat_main.inputs['Material'].default_value = mat_main
+    set_mat_main.location = (200, 200)
+    links.new(transform_road_main.outputs[0], set_mat_main.inputs['Geometry'])
+
+    # 幹線の車線マーキング（白線: Z +0.228m でアスファルトの8mm上に配置）
+    join_profiles_main = nodes.new('GeometryNodeJoinGeometry')
+    join_profiles_main.location = (-300, -150)
+    marking_positions = [-main_width / 2.0 + line_width / 2.0, main_width / 2.0 - line_width / 2.0]
+    lane_w = main_width / main_lanes
+    for i in range(1, main_lanes):
+        marking_positions.append(-main_width / 2.0 + i * lane_w)
+    for pos in marking_positions:
+        ln = nodes.new('GeometryNodeCurvePrimitiveLine')
+        ln.inputs['Start'].default_value = (pos + line_width / 2.0, 0, 0)
+        ln.inputs['End'].default_value   = (pos - line_width / 2.0, 0, 0)
+        links.new(ln.outputs[0], join_profiles_main.inputs['Geometry'])
+
+    mesh_lines_main = nodes.new('GeometryNodeCurveToMesh')
+    mesh_lines_main.location = (-100, -100)
+    links.new(fillet_main.outputs[0], mesh_lines_main.inputs['Curve'])
+    links.new(join_profiles_main.outputs[0], mesh_lines_main.inputs['Profile Curve'])
+
+    transform_lines = nodes.new('GeometryNodeTransform')
+    transform_lines.inputs['Translation'].default_value = (0, 0, 0.228)
+    transform_lines.location = (100, -100)
+    links.new(mesh_lines_main.outputs[0], transform_lines.inputs['Geometry'])
+
+    set_mat_line = nodes.new('GeometryNodeSetMaterial')
+    set_mat_line.inputs['Material'].default_value = mat_line
+    set_mat_line.location = (250, -100)
+    links.new(transform_lines.outputs[0], set_mat_line.inputs['Geometry'])
+
+    join_main_all = nodes.new('GeometryNodeJoinGeometry')
+    join_main_all.location = (450, 150)
+    links.new(set_mat_main.outputs[0], join_main_all.inputs['Geometry'])
+    links.new(set_mat_line.outputs[0], join_main_all.inputs['Geometry'])
+
+    # 3. 街路・小道（Inverted: radius <= 0.75）の処理
+    fillet_sub = nodes.new('GeometryNodeFilletCurve')
+    fillet_sub.mode = 'POLY'
+    fillet_sub.inputs['Count'].default_value = 16
+    fillet_sub.inputs['Limit Radius'].default_value = True
+    fillet_sub.inputs['Radius'].default_value = sub_width * 0.8
+    fillet_sub.location = (-350, -350)
+    links.new(sep_geom.outputs['Inverted'], fillet_sub.inputs['Curve'])
+
+    curve_to_mesh_sub = nodes.new('GeometryNodeCurveToMesh')
+    curve_to_mesh_sub.location = (-100, -350)
+    prof_line_sub = nodes.new('GeometryNodeCurvePrimitiveLine')
+    prof_line_sub.inputs['Start'].default_value = (sub_width / 2.0, 0, 0)
+    prof_line_sub.inputs['End'].default_value = (-sub_width / 2.0, 0, 0)
+    prof_line_sub.location = (-300, -500)
+    links.new(fillet_sub.outputs[0], curve_to_mesh_sub.inputs['Curve'])
+    links.new(prof_line_sub.outputs[0], curve_to_mesh_sub.inputs['Profile Curve'])
+
+    # 街路・小道面も地面から確実に浮かせる (Z +0.20m)
+    transform_sub = nodes.new('GeometryNodeTransform')
+    transform_sub.inputs['Translation'].default_value = (0, 0, 0.20)
+    transform_sub.location = (50, -350)
+    links.new(curve_to_mesh_sub.outputs[0], transform_sub.inputs['Geometry'])
+
+    set_mat_sub = nodes.new('GeometryNodeSetMaterial')
+    set_mat_sub.inputs['Material'].default_value = mat_sub
+    set_mat_sub.location = (200, -350)
+    links.new(transform_sub.outputs[0], set_mat_sub.inputs['Geometry'])
+
+    # 4. 全体の結合とマージ
+    join_final = nodes.new('GeometryNodeJoinGeometry')
+    join_final.location = (650, 0)
+    links.new(join_main_all.outputs[0], join_final.inputs['Geometry'])
+    links.new(set_mat_sub.outputs[0], join_final.inputs['Geometry'])
+
+    merge_final = nodes.new('GeometryNodeMergeByDistance')
+    merge_final.inputs['Distance'].default_value = 0.005
+    merge_final.location = (850, 0)
+    links.new(join_final.outputs[0], merge_final.inputs['Geometry'])
+    links.new(merge_final.outputs[0], node_out.inputs[0])
+
+    return gn_mod
+
 
 # オペレータ スプライン道路生成
 class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
     bl_idname = "myaddon.myaddon_ot_create_road_along_spline"
     bl_label = "スプライン道路生成"
-    bl_description = "スプライン曲線に沿って道路メッシュを生成します"
+    bl_description = "スプライン曲線に沿って道路メッシュを生成します（アスファルト・砂利道・砂道選択可）"
     bl_options = {'REGISTER', 'UNDO'}
+
+    road_type: bpy.props.EnumProperty(  # type: ignore
+        name="道路タイプ",
+        description="道路の路面種類（アスファルト、砂利道、砂道）",
+        items=[
+            ('ASPHALT', 'アスファルト（舗装・白線あり）', '通常の舗装道路（車線マーキングあり）'),
+            ('GRAVEL', '砂利道（未舗装・小石）', '小石・砂利が混ざった未舗装路（白線なし）'),
+            ('SAND_DIRT', '砂道（未舗装・ダート）', '砂や土のダート道（白線なし）'),
+        ],
+        default='ASPHALT',
+    )
 
     lane_count: bpy.props.IntProperty(  # type: ignore
         name="車線数",
@@ -33,178 +388,34 @@ class MYADDON_OT_create_road_along_spline(bpy.types.Operator):
     )
 
     def execute(self, context):
-        total_width = self.lane_count * self.lane_width
-
-        # マテリアルの作成（既存があれば再利用）
-        mat_road = bpy.data.materials.get("Road_Asphalt")
-        if mat_road is None:
-            mat_road = bpy.data.materials.new("Road_Asphalt")
-            mat_road.use_nodes = True
-            mat_road.diffuse_color = (0.12, 0.12, 0.12, 1.0)  # Solidモード用
-            bsdf = mat_road.node_tree.nodes.get("Principled BSDF")
-            if bsdf is None:  # Blenderバージョン互換フォールバック
-                for node in mat_road.node_tree.nodes:
-                    if node.type == 'BSDF_PRINCIPLED':
-                        bsdf = node
-                        break
-            if bsdf:
-                bsdf.inputs["Base Color"].default_value = (0.12, 0.12, 0.12, 1.0)
-                bsdf.inputs["Roughness"].default_value = 0.85
-
-        mat_line = bpy.data.materials.get("Road_LaneLine")
-        if mat_line is None:
-            mat_line = bpy.data.materials.new("Road_LaneLine")
-            mat_line.use_nodes = True
-            mat_line.diffuse_color = (0.95, 0.95, 0.95, 1.0)  # Solidモード用
-            bsdf = mat_line.node_tree.nodes.get("Principled BSDF")
-            if bsdf is None:
-                for node in mat_line.node_tree.nodes:
-                    if node.type == 'BSDF_PRINCIPLED':
-                        bsdf = node
-                        break
-            if bsdf:
-                bsdf.inputs["Base Color"].default_value = (0.95, 0.95, 0.95, 1.0)
-                bsdf.inputs["Roughness"].default_value = 0.5
-
-        # 1. POLY曲線の作成（Fillet CurveのPOLYモードと相性が良く、Alt+Sも確実に動作する）
+        # 1. POLY曲線の作成
         curve_data = bpy.data.curves.new("RoadPath", 'CURVE')
         curve_data.dimensions = '3D'
-        
-        # 道路がねじれたり反転したりするのを防ぐため、Twist Modeを Z-Up に固定
         curve_data.twist_mode = 'Z_UP'
 
-        
         spline = curve_data.splines.new('POLY')
-        spline.points.add(1)  # デフォルトで1点あるので、計2点になる
-        spline.points[0].co = (0.0, 0.0, 0.0, 1.0)  # (x, y, z, w)
+        spline.points.add(1)
+        spline.points[0].co = (0.0, 0.0, 0.0, 1.0)
         spline.points[1].co = (4.0, 0.0, 0.0, 1.0)
-        
+
         curve_obj = bpy.data.objects.new("RoadPath", curve_data)
         context.collection.objects.link(curve_obj)
         context.view_layer.objects.active = curve_obj
         curve_obj.select_set(True)
 
-        # マテリアルスロットに追加
-        curve_obj.data.materials.append(mat_road)
-        curve_obj.data.materials.append(mat_line)
-        
-        # 2. Geometry Nodesで道路メッシュを生成
-        gn_mod = curve_obj.modifiers.new(name="RoadGen", type='NODES')
-        group = bpy.data.node_groups.new("RoadGenTree", 'GeometryNodeTree')
-        gn_mod.node_group = group
-        
-        # バージョン互換性（Blender 4.0以降と3.x以前）
-        if hasattr(group, "interface"):
-            group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
-            group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
-        else:
-            group.inputs.new('NodeSocketGeometry', 'Geometry')
-            group.outputs.new('NodeSocketGeometry', 'Geometry')
-            
-        nodes = group.nodes
-        links = group.links
-        
-        node_in = nodes.new('NodeGroupInput')
-        node_out = nodes.new('NodeGroupOutput')
-        
-        # Fillet Curve: 角を自動的に丸める（Z-fighting防止）
-        # 各頂点のradius属性（Alt+S）をフィレット半径の倍率として使用
-        # → radius=1.0（デフォルト）：通常通り角が丸まる
-        # → radius=0.0（Alt+S → 0）：丸めなし＝道路がその点を必ず通過する
-        fillet_curve = nodes.new('GeometryNodeFilletCurve')
-        fillet_curve.mode = 'POLY'
-        fillet_curve.inputs['Count'].default_value = 16
-        # S字カーブなどで隣り合うフィレット同士が重ならないように半径を自動制限
-        fillet_curve.inputs['Limit Radius'].default_value = True
-        
-        # 基本フィレット半径 × 各頂点のradius属性（フィレット前に読み取る）
-        base_radius = nodes.new('ShaderNodeValue')
-        base_radius.outputs[0].default_value = total_width * 1.0
-        
-        radius_attr = nodes.new('GeometryNodeInputRadius')
-        
-        multiply = nodes.new('ShaderNodeMath')
-        multiply.operation = 'MULTIPLY'
-        
-        links.new(base_radius.outputs[0], multiply.inputs[0])
-        links.new(radius_attr.outputs[0], multiply.inputs[1])
-        links.new(multiply.outputs[0], fillet_curve.inputs['Radius'])
-        
-        links.new(node_in.outputs[0], fillet_curve.inputs['Curve'])
-        
-        # フィレット後、全頂点の半径を1.0に統一（道路幅を一定に保つ）
-        set_radius = nodes.new('GeometryNodeSetCurveRadius')
-        set_radius.inputs['Radius'].default_value = 1.0
-        
-        links.new(fillet_curve.outputs[0], set_radius.inputs['Curve'])
-        
-        # 道路本体 (Curve to Mesh)
-        curve_to_mesh = nodes.new('GeometryNodeCurveToMesh')
-        profile_line = nodes.new('GeometryNodeCurvePrimitiveLine')
-        profile_line.inputs['Start'].default_value = (total_width / 2.0, 0, 0)
-        profile_line.inputs['End'].default_value = (-total_width / 2.0, 0, 0)
+        # 2. Geometry Nodesで道路メッシュを構築
+        setup_road_geometry_nodes(
+            curve_obj=curve_obj,
+            road_type=self.road_type,
+            lane_count=self.lane_count,
+            lane_width=self.lane_width,
+            line_width=self.line_width
+        )
 
-        links.new(set_radius.outputs[0], curve_to_mesh.inputs['Curve'])
-        links.new(profile_line.outputs[0], curve_to_mesh.inputs['Profile Curve'])
-
-        # 道路面にマテリアルを割り当て
-        set_mat_road = nodes.new('GeometryNodeSetMaterial')
-        set_mat_road.inputs['Material'].default_value = mat_road
-        links.new(curve_to_mesh.outputs[0], set_mat_road.inputs['Geometry'])
-
-        # ── 車線マーキング ──
-        line_w = self.line_width
-        z_up = 0.005  # 道路面からの微小オフセット（Z-fighting防止）
-
-        # マーキング位置を計算
-        marking_positions = []
-        # 端線（道路の両端、少し内側）
-        marking_positions.append(-total_width / 2.0 + line_w / 2.0)
-        marking_positions.append( total_width / 2.0 - line_w / 2.0)
-        # 車線区分線（車線間の区切り）
-        for i in range(1, self.lane_count):
-            marking_positions.append(-total_width / 2.0 + i * self.lane_width)
-
-        # 各マーキング位置にラインプロファイルを作成して結合
-        join_profiles = nodes.new('GeometryNodeJoinGeometry')
-        for pos in marking_positions:
-            ln = nodes.new('GeometryNodeCurvePrimitiveLine')
-            ln.inputs['Start'].default_value = (pos + line_w / 2.0, 0, 0)
-            ln.inputs['End'].default_value   = (pos - line_w / 2.0, 0, 0)
-            links.new(ln.outputs[0], join_profiles.inputs['Geometry'])
-
-        # 車線マーキングメッシュを生成
-        curve_to_mesh_lines = nodes.new('GeometryNodeCurveToMesh')
-        links.new(set_radius.outputs[0], curve_to_mesh_lines.inputs['Curve'])
-        links.new(join_profiles.outputs[0], curve_to_mesh_lines.inputs['Profile Curve'])
-
-        # マーキングをZ+方向に直接移動（オフセットの確実な適用）
-        transform_lines = nodes.new('GeometryNodeTransform')
-        transform_lines.inputs['Translation'].default_value = (0, 0, z_up)
-        links.new(curve_to_mesh_lines.outputs[0], transform_lines.inputs['Geometry'])
-
-        # マーキングにマテリアルを割り当て
-        set_mat_line = nodes.new('GeometryNodeSetMaterial')
-        set_mat_line.inputs['Material'].default_value = mat_line
-        links.new(transform_lines.outputs[0], set_mat_line.inputs['Geometry'])
-
-        # 道路面とマーキングを結合
-        join_all = nodes.new('GeometryNodeJoinGeometry')
-        links.new(set_mat_road.outputs[0], join_all.inputs['Geometry'])
-        links.new(set_mat_line.outputs[0], join_all.inputs['Geometry'])
-
-        # 重なった頂点を自動マージ（角・分岐点のZ-fighting軽減）
-        merge = nodes.new('GeometryNodeMergeByDistance')
-        merge.inputs['Distance'].default_value = 0.001
-
-        links.new(join_all.outputs[0], merge.inputs['Geometry'])
-        links.new(merge.outputs[0], node_out.inputs[0])
-        
-        # アクティブオブジェクトをメインのカーブに戻す
         context.view_layer.objects.active = curve_obj
         curve_obj.select_set(True)
 
-        print("スプライン道路を生成しました。")
+        print(f"スプライン道路を生成しました（タイプ: {self.road_type}）。")
         return {'FINISHED'}
 
 

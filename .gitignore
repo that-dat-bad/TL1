@@ -10,3 +10,7 @@
 *$py.class
 
 level_chunk_test/
+*.json
+!.agents/**
+!level_chunk_test/**
+.ai_terrain_config.json

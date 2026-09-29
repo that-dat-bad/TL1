@@ -7,7 +7,50 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
     bl_description = "ジオメトリノードを使用して起伏、道路平坦化、スプライン山脈/谷を施した地形を生成します"
     bl_options = {'REGISTER', 'UNDO'}
 
+    preset: bpy.props.EnumProperty(
+        name="起伏プリセット",
+        description="ベースとなる起伏タイプを選択",
+        items=[
+            ('FLAT', "平野 / 街 (Flat / City)", "ベース起伏を抑えてほぼ平坦にし、都市や道路に適した地面にします"),
+            ('HILLS', "丘陵 (Hills)", "適度な起伏のある自然な地形にします"),
+            ('MOUNTAINS', "山岳 (Mountains)", "起伏の大きな険しい山岳地形にします"),
+        ],
+        default='FLAT',
+    ) # type: ignore
+
+    biome: bpy.props.EnumProperty(
+        name="環境 (バイオーム)",
+        description="地形のマテリアル・環境タイプを選択",
+        items=[
+            ('PLAINS', "草原 / 平原 (Plains)", "豊かなグリーンと茶褐色の崖"),
+            ('DESERT', "砂漠 (Desert)", "温かみのあるオレンジ〜黄色の砂地と赤褐色の岩肌"),
+            ('SNOW', "雪山 / 氷河 (Snow)", "白銀の雪原と冷たい青暗い岩肌"),
+            ('CANYON', "峡谷 / 荒野 (Canyon)", "赤土やテラコッタ層の雄大な岩盤"),
+            ('VOLCANO', "火山 (Volcano)", "黒い溶岩石と灰の大地"),
+        ],
+        default='PLAINS',
+    ) # type: ignore
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=340)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "preset")
+        layout.prop(self, "biome")
+
     def execute(self, context):
+        # プリセットに応じたベース起伏とノイズスケール (20kmスケール対応)
+        if self.preset == 'FLAT':
+            preset_height = 5.0
+            preset_noise = 0.0002
+        elif self.preset == 'HILLS':
+            preset_height = 80.0
+            preset_noise = 0.0005
+        else: # MOUNTAINS
+            preset_height = 300.0
+            preset_noise = 0.0008
+
         # 1. 空の地形用メッシュオブジェクトの作成 (サイズや分割数はジオメトリノード側で動的に制御します)
         mesh_data = bpy.data.meshes.new("TerrainMesh")
         terrain_obj = bpy.data.objects.new("Terrain", mesh_data)
@@ -25,22 +68,22 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.interface.new_socket('Road Object', in_out='INPUT', socket_type='NodeSocketObject')
             group.interface.new_socket('Mountain Collection', in_out='INPUT', socket_type='NodeSocketCollection')
             group.interface.new_socket('Valley Collection', in_out='INPUT', socket_type='NodeSocketCollection')
-            # Grid Dimensions
-            group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
-            group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 200.0
+            # Grid Dimensions (デフォルト 20km: 20000.0m)
+            group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 20000.0
+            group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 20000.0
 
             # Height and Noise Settings
-            group.interface.new_socket('Noise Scale', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 0.05
-            group.interface.new_socket('Terrain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 10.0
-            # Mountain Parameters
-            group.interface.new_socket('Mountain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 15.0
-            group.interface.new_socket('Mountain Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 10.0
-            # Valley Parameters
-            group.interface.new_socket('Valley Depth', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 8.0
-            group.interface.new_socket('Valley Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 8.0
+            group.interface.new_socket('Noise Scale', in_out='INPUT', socket_type='NodeSocketFloat').default_value = preset_noise
+            group.interface.new_socket('Terrain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = preset_height
+            # Mountain Parameters (20kmスケール)
+            group.interface.new_socket('Mountain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 400.0
+            group.interface.new_socket('Mountain Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 1200.0
+            # Valley Parameters (20kmスケール)
+            group.interface.new_socket('Valley Depth', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 350.0
+            group.interface.new_socket('Valley Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 1500.0
             # Flat Parameters
-            group.interface.new_socket('Flat Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 3.0
-            group.interface.new_socket('Flat Blend', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 2.0
+            group.interface.new_socket('Flat Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 25.0
+            group.interface.new_socket('Flat Blend', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 35.0
             # Hole Parameters
             group.interface.new_socket('Hole Location', in_out='INPUT', socket_type='NodeSocketVector').default_value = (0.0, 0.0, 0.0)
             group.interface.new_socket('Hole Size', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 0.0
@@ -54,17 +97,17 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.inputs.new('NodeSocketObject', 'Road Object')
             group.inputs.new('NodeSocketCollection', 'Mountain Collection')
             group.inputs.new('NodeSocketCollection', 'Valley Collection')
-            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 200.0
-            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 200.0
+            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 20000.0
+            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 20000.0
 
-            group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = 0.05
-            group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = 10.0
-            group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = 15.0
-            group.inputs.new('NodeSocketFloat', 'Mountain Radius').default_value = 10.0
-            group.inputs.new('NodeSocketFloat', 'Valley Depth').default_value = 8.0
-            group.inputs.new('NodeSocketFloat', 'Valley Radius').default_value = 8.0
-            group.inputs.new('NodeSocketFloat', 'Flat Radius').default_value = 3.0
-            group.inputs.new('NodeSocketFloat', 'Flat Blend').default_value = 2.0
+            group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = preset_noise
+            group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = preset_height
+            group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = 400.0
+            group.inputs.new('NodeSocketFloat', 'Mountain Radius').default_value = 1200.0
+            group.inputs.new('NodeSocketFloat', 'Valley Depth').default_value = 350.0
+            group.inputs.new('NodeSocketFloat', 'Valley Radius').default_value = 1500.0
+            group.inputs.new('NodeSocketFloat', 'Flat Radius').default_value = 25.0
+            group.inputs.new('NodeSocketFloat', 'Flat Blend').default_value = 35.0
             group.inputs.new('NodeSocketVector', 'Hole Location').default_value = (0.0, 0.0, 0.0)
             group.inputs.new('NodeSocketFloat', 'Hole Size').default_value = 0.0
             
@@ -143,16 +186,27 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             # 古いBlenderバージョン用のフォールバック（存在しない場合は常にフル解像度）
             node_is_viewport = None
 
-        # ビューポート時の分割数計算 (Grid Size / 4)
+        # ベース分割数計算 (Size / 20.0m 間隔: 20kmなら1000分割)
+        math_step_x = nodes.new('ShaderNodeMath')
+        math_step_x.operation = 'DIVIDE'
+        math_step_x.inputs[1].default_value = 20.0
+        links.new(node_in.outputs['Grid Size X'], math_step_x.inputs[0])
+
+        math_step_y = nodes.new('ShaderNodeMath')
+        math_step_y.operation = 'DIVIDE'
+        math_step_y.inputs[1].default_value = 20.0
+        links.new(node_in.outputs['Grid Size Y'], math_step_y.inputs[0])
+
+        # ビューポート時の分割数計算 (さらに / 4: 20kmなら250分割)
         math_div_x = nodes.new('ShaderNodeMath')
         math_div_x.operation = 'DIVIDE'
         math_div_x.inputs[1].default_value = 4.0
-        links.new(node_in.outputs['Grid Size X'], math_div_x.inputs[0])
+        links.new(math_step_x.outputs[0], math_div_x.inputs[0])
 
         math_div_y = nodes.new('ShaderNodeMath')
         math_div_y.operation = 'DIVIDE'
         math_div_y.inputs[1].default_value = 4.0
-        links.new(node_in.outputs['Grid Size Y'], math_div_y.inputs[0])
+        links.new(math_step_y.outputs[0], math_div_y.inputs[0])
 
         # スイッチノード (Viewport なら /4、Render なら そのまま)
         switch_res_x = nodes.new('GeometryNodeSwitch')
@@ -162,7 +216,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             pass # 3.x compatibility
         if node_is_viewport:
             links.new(node_is_viewport.outputs[0], switch_res_x.inputs[0])
-        links.new(node_in.outputs['Grid Size X'], switch_res_x.inputs['False'])
+        links.new(math_step_x.outputs[0], switch_res_x.inputs['False'])
         links.new(math_div_x.outputs[0], switch_res_x.inputs['True'])
 
         switch_res_y = nodes.new('GeometryNodeSwitch')
@@ -172,10 +226,10 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             pass
         if node_is_viewport:
             links.new(node_is_viewport.outputs[0], switch_res_y.inputs[0])
-        links.new(node_in.outputs['Grid Size Y'], switch_res_y.inputs['False'])
+        links.new(math_step_y.outputs[0], switch_res_y.inputs['False'])
         links.new(math_div_y.outputs[0], switch_res_y.inputs['True'])
 
-        # X方向の分割数計算: max(floor(Size) + 1, 2)
+        # X方向の分割数計算: clamp(floor(Res) + 1, 2, 1500)
         math_floor_x = nodes.new('ShaderNodeMath')
         math_floor_x.operation = 'FLOOR'
         links.new(switch_res_x.outputs['Output'] if 'Output' in switch_res_x.outputs else switch_res_x.outputs[0], math_floor_x.inputs[0])
@@ -189,10 +243,15 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         math_max_x.operation = 'MAXIMUM'
         math_max_x.inputs[1].default_value = 2.0
         links.new(math_add_x.outputs[0], math_max_x.inputs[0])
-        
-        links.new(math_max_x.outputs[0], node_grid.inputs['Vertices X'])
 
-        # Y方向の分割数計算: max(floor(Size) + 1, 2)
+        math_clamp_x = nodes.new('ShaderNodeMath')
+        math_clamp_x.operation = 'MINIMUM'
+        math_clamp_x.inputs[1].default_value = 1500.0
+        links.new(math_max_x.outputs[0], math_clamp_x.inputs[0])
+        
+        links.new(math_clamp_x.outputs[0], node_grid.inputs['Vertices X'])
+
+        # Y方向の分割数計算: clamp(floor(Res) + 1, 2, 1500)
         math_floor_y = nodes.new('ShaderNodeMath')
         math_floor_y.operation = 'FLOOR'
         links.new(switch_res_y.outputs['Output'] if 'Output' in switch_res_y.outputs else switch_res_y.outputs[0], math_floor_y.inputs[0])
@@ -206,8 +265,13 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         math_max_y.operation = 'MAXIMUM'
         math_max_y.inputs[1].default_value = 2.0
         links.new(math_add_y.outputs[0], math_max_y.inputs[0])
+
+        math_clamp_y = nodes.new('ShaderNodeMath')
+        math_clamp_y.operation = 'MINIMUM'
+        math_clamp_y.inputs[1].default_value = 1500.0
+        links.new(math_max_y.outputs[0], math_clamp_y.inputs[0])
         
-        links.new(math_max_y.outputs[0], node_grid.inputs['Vertices Y'])
+        links.new(math_clamp_y.outputs[0], node_grid.inputs['Vertices Y'])
 
         # 1. Position ノード
         node_pos = nodes.new('GeometryNodeInputPosition')
@@ -634,12 +698,12 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_add_blend.outputs[0], node_map_range.inputs['From Max'])
 
         # 6. 線形補間(Lerp)の計算 (Mix Float ノードの互換性対策)
-        # Z-fightingおよび道路が埋まるのを防ぐため、道路より地形を0.1m下げる
+        # Z-fightingおよび道路が埋まるのを防ぐため、道路より地形を0.3m下げる
         node_offset_z = nodes.new('ShaderNodeMath')
         node_offset_z.operation = 'SUBTRACT'
         node_offset_z.location = (1000, 400)
         links.new(node_sep_prox.outputs['Z'], node_offset_z.inputs[0])
-        node_offset_z.inputs[1].default_value = 0.1
+        node_offset_z.inputs[1].default_value = 0.3
 
         # MixZ = CurrZ + ((ProxZ - 0.1) - CurrZ) * Factor
         # (A) (ProxZ - 0.1) - CurrZ
@@ -752,9 +816,12 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         trans_geo_out = node_trans.outputs['Geometry'] if 'Geometry' in node_trans.outputs else node_trans.outputs[0]
         links.new(trans_geo_out, node_boolean.inputs['Mesh 2'])
 
-        # 出力を最終的なGeometryに接続
+        # 出力を最終的なGeometryに接続 (Set Material ノードを通してマテリアルを確実に反映)
+        node_set_mat = nodes.new('GeometryNodeSetMaterial')
+        node_set_mat.location = (1750, -100)
         boolean_mesh_out = node_boolean.outputs['Mesh'] if 'Mesh' in node_boolean.outputs else node_boolean.outputs[0]
-        links.new(boolean_mesh_out, node_out.inputs['Geometry'])
+        links.new(boolean_mesh_out, node_set_mat.inputs['Geometry'])
+        links.new(node_set_mat.outputs['Geometry'], node_out.inputs['Geometry'])
 
 
         # ==========================================
@@ -816,6 +883,58 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         # 全てのノードとリンクの構築が完了した後にノードグループを割り当てる
         # （これにより依存関係が正常にアップデートされ、オブジェクトアサイン等も正常に機能します）
         gn_mod.node_group = group
+
+        # モディファイア入力値にプリセット値および既存コレクションを明示的に反映
+        def set_gn_input(m, grp, name, val):
+            if val is None:
+                return False
+            if name in m:
+                try:
+                    m[name] = val
+                    return True
+                except:
+                    pass
+            if hasattr(grp, "interface"):
+                for item in grp.interface.items_tree:
+                    if getattr(item, 'item_type', '') == 'SOCKET' and item.in_out == 'INPUT' and item.name == name:
+                        try:
+                            m[item.identifier] = val
+                            return True
+                        except:
+                            pass
+            elif hasattr(grp, "inputs"):
+                for item in grp.inputs:
+                    if item.name == name:
+                        try:
+                            m[item.identifier] = val
+                            return True
+                        except:
+                            pass
+            return False
+
+        set_gn_input(gn_mod, group, 'Terrain Height', preset_height)
+        set_gn_input(gn_mod, group, 'Noise Scale', preset_noise)
+        set_gn_input(gn_mod, group, 'Grid Size X', 20000.0)
+        set_gn_input(gn_mod, group, 'Grid Size Y', 20000.0)
+        
+        # 既存コレクション・オブジェクトの自動アサイン
+        val_col = bpy.data.collections.get("Valleys")
+        mt_col = bpy.data.collections.get("Mountains")
+        road_obj = bpy.data.objects.get("RoadPath_AI") or bpy.data.objects.get("RoadPath")
+        
+        if val_col:
+            set_gn_input(gn_mod, group, 'Valley Collection', val_col)
+        if mt_col:
+            set_gn_input(gn_mod, group, 'Mountain Collection', mt_col)
+        if road_obj:
+            set_gn_input(gn_mod, group, 'Road Object', road_obj)
+
+        # バイオームマテリアルの自動適用
+        try:
+            from .terrain_materials import apply_biome_material_to_terrain
+            apply_biome_material_to_terrain(terrain_obj, biome=self.biome)
+        except Exception as e:
+            print(f"マテリアル適用エラー: {e}")
 
         print("ジオメトリノード地形生成システムが構築されました。")
         return {'FINISHED'}
