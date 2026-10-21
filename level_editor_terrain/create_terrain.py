@@ -22,13 +22,24 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         name="環境 (バイオーム)",
         description="地形のマテリアル・環境タイプを選択",
         items=[
+            ('MULTI', "複合大陸 (Multi-Biome)", "標高連動の雪山山頂＋大域ノイズによる草原・砂漠・峡谷の複合バイオーム"),
             ('PLAINS', "草原 / 平原 (Plains)", "豊かなグリーンと茶褐色の崖"),
             ('DESERT', "砂漠 (Desert)", "温かみのあるオレンジ〜黄色の砂地と赤褐色の岩肌"),
             ('SNOW', "雪山 / 氷河 (Snow)", "白銀の雪原と冷たい青暗い岩肌"),
             ('CANYON', "峡谷 / 荒野 (Canyon)", "赤土やテラコッタ層の雄大な岩盤"),
             ('VOLCANO', "火山 (Volcano)", "黒い溶岩石と灰の大地"),
         ],
-        default='PLAINS',
+        default='MULTI',
+    ) # type: ignore
+
+    terrain_scale: bpy.props.EnumProperty(
+        name="地形スケール",
+        description="地形の全体サイズ（幅×奥行）を選択",
+        items=[
+            ('40KM', "40km 四方 (40,000m × 40,000m: 超広大)", "40kmオープンワールドスケール（推奨）"),
+            ('20KM', "20km 四方 (20,000m × 20,000m: 標準)", "従来の20kmオープンワールドスケール"),
+        ],
+        default='40KM',
     ) # type: ignore
 
     def invoke(self, context, event):
@@ -36,20 +47,29 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(self, "terrain_scale")
         layout.prop(self, "preset")
         layout.prop(self, "biome")
 
     def execute(self, context):
-        # プリセットに応じたベース起伏とノイズスケール (20kmスケール対応)
+        is_40km = (self.terrain_scale == '40KM')
+        target_size = 40000.0 if is_40km else 20000.0
+
+        # プリセットに応じたベース起伏とノイズスケール (40km / 20kmスケール対応)
         if self.preset == 'FLAT':
             preset_height = 5.0
-            preset_noise = 0.0002
+            preset_noise = 0.0001 if is_40km else 0.0002
         elif self.preset == 'HILLS':
-            preset_height = 80.0
-            preset_noise = 0.0005
+            preset_height = 100.0 if is_40km else 80.0
+            preset_noise = 0.00025 if is_40km else 0.0005
         else: # MOUNTAINS
-            preset_height = 300.0
-            preset_noise = 0.0008
+            preset_height = 350.0 if is_40km else 300.0
+            preset_noise = 0.0004 if is_40km else 0.0008
+
+        mt_height = 550.0 if is_40km else 400.0
+        mt_radius = 2200.0 if is_40km else 1200.0
+        val_depth = 450.0 if is_40km else 350.0
+        val_radius = 2200.0 if is_40km else 1500.0
 
         # 1. 空の地形用メッシュオブジェクトの作成 (サイズや分割数はジオメトリノード側で動的に制御します)
         mesh_data = bpy.data.meshes.new("TerrainMesh")
@@ -68,19 +88,19 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.interface.new_socket('Road Object', in_out='INPUT', socket_type='NodeSocketObject')
             group.interface.new_socket('Mountain Collection', in_out='INPUT', socket_type='NodeSocketCollection')
             group.interface.new_socket('Valley Collection', in_out='INPUT', socket_type='NodeSocketCollection')
-            # Grid Dimensions (デフォルト 20km: 20000.0m)
-            group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 20000.0
-            group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 20000.0
+            # Grid Dimensions (40km: 40000.0m / 20km: 20000.0m)
+            group.interface.new_socket('Grid Size X', in_out='INPUT', socket_type='NodeSocketFloat').default_value = target_size
+            group.interface.new_socket('Grid Size Y', in_out='INPUT', socket_type='NodeSocketFloat').default_value = target_size
 
             # Height and Noise Settings
             group.interface.new_socket('Noise Scale', in_out='INPUT', socket_type='NodeSocketFloat').default_value = preset_noise
             group.interface.new_socket('Terrain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = preset_height
-            # Mountain Parameters (20kmスケール)
-            group.interface.new_socket('Mountain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 400.0
-            group.interface.new_socket('Mountain Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 1200.0
-            # Valley Parameters (20kmスケール)
-            group.interface.new_socket('Valley Depth', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 350.0
-            group.interface.new_socket('Valley Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 1500.0
+            # Mountain Parameters
+            group.interface.new_socket('Mountain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = mt_height
+            group.interface.new_socket('Mountain Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = mt_radius
+            # Valley Parameters
+            group.interface.new_socket('Valley Depth', in_out='INPUT', socket_type='NodeSocketFloat').default_value = val_depth
+            group.interface.new_socket('Valley Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = val_radius
             # Flat Parameters
             group.interface.new_socket('Flat Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 25.0
             group.interface.new_socket('Flat Blend', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 35.0
@@ -97,15 +117,15 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.inputs.new('NodeSocketObject', 'Road Object')
             group.inputs.new('NodeSocketCollection', 'Mountain Collection')
             group.inputs.new('NodeSocketCollection', 'Valley Collection')
-            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = 20000.0
-            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = 20000.0
+            group.inputs.new('NodeSocketFloat', 'Grid Size X').default_value = target_size
+            group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = target_size
 
             group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = preset_noise
             group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = preset_height
-            group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = 400.0
-            group.inputs.new('NodeSocketFloat', 'Mountain Radius').default_value = 1200.0
-            group.inputs.new('NodeSocketFloat', 'Valley Depth').default_value = 350.0
-            group.inputs.new('NodeSocketFloat', 'Valley Radius').default_value = 1500.0
+            group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = mt_height
+            group.inputs.new('NodeSocketFloat', 'Mountain Radius').default_value = mt_radius
+            group.inputs.new('NodeSocketFloat', 'Valley Depth').default_value = val_depth
+            group.inputs.new('NodeSocketFloat', 'Valley Radius').default_value = val_radius
             group.inputs.new('NodeSocketFloat', 'Flat Radius').default_value = 25.0
             group.inputs.new('NodeSocketFloat', 'Flat Blend').default_value = 35.0
             group.inputs.new('NodeSocketVector', 'Hole Location').default_value = (0.0, 0.0, 0.0)
@@ -914,8 +934,12 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
         set_gn_input(gn_mod, group, 'Terrain Height', preset_height)
         set_gn_input(gn_mod, group, 'Noise Scale', preset_noise)
-        set_gn_input(gn_mod, group, 'Grid Size X', 20000.0)
-        set_gn_input(gn_mod, group, 'Grid Size Y', 20000.0)
+        set_gn_input(gn_mod, group, 'Grid Size X', target_size)
+        set_gn_input(gn_mod, group, 'Grid Size Y', target_size)
+        set_gn_input(gn_mod, group, 'Mountain Height', mt_height)
+        set_gn_input(gn_mod, group, 'Mountain Radius', mt_radius)
+        set_gn_input(gn_mod, group, 'Valley Depth', val_depth)
+        set_gn_input(gn_mod, group, 'Valley Radius', val_radius)
         
         # 既存コレクション・オブジェクトの自動アサイン
         val_col = bpy.data.collections.get("Valleys")
@@ -936,7 +960,17 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         except Exception as e:
             print(f"マテリアル適用エラー: {e}")
 
-        print("ジオメトリノード地形生成システムが構築されました。")
+        # 3Dビューポートのクリップ距離をスケールに合わせて拡張 (奥が消えないように)
+        try:
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for space in area.spaces:
+                        if space.type == 'VIEW_3D':
+                            space.clip_end = max(space.clip_end, 80000.0)
+        except:
+            pass
+
+        print(f"ジオメトリノード地形生成システムが構築されました ({target_size/1000.0:.0f}kmスケール)。")
         return {'FINISHED'}
 
 

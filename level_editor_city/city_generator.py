@@ -11,7 +11,7 @@ import random
 4. 「90度の四角を作るな」-> 斜め貫通大通りと曲線街路による不規則な多角形・台形・三角形街区。
 """
 
-BOUND_LIMIT = 8800.0
+BOUND_LIMIT = 18000.0
 
 def clamp(val, min_v, max_v):
     return max(min_v, min(max_v, val))
@@ -100,14 +100,15 @@ def make_curved_link(p1, p2, curve_amp=0.08, s_curve_amp=0.05, seed=1, bound=BOU
     return smooth_curve(pts, max_seg_len=40.0, bound=bound)
 
 class ProceduralCityGenerator:
-    def __init__(self, terrain_size_x=20000, terrain_size_y=20000):
-        self.size_x = terrain_size_x
-        self.size_y = terrain_size_y
-        self.bound = BOUND_LIMIT
+    def __init__(self, terrain_size_x=40000, terrain_size_y=40000):
+        self.size_x = float(terrain_size_x)
+        self.size_y = float(terrain_size_y)
+        self.bound = min(self.size_x, self.size_y) * 0.44
+        self.scale_factor = self.size_x / 20000.0
         self.all_points = []
         self.generated_splines = []
         self.spline_metadata = []
-        self.city_center = (4000.0, 0.0, 0.0)
+        self.city_center = (self.size_x * 0.21, -200.0, 0.0)
 
     def _clamp_point(self, p):
         return clamp_point(p, self.bound)
@@ -133,12 +134,16 @@ class ProceduralCityGenerator:
         if all_xs and all_ys:
             avg_x = sum(all_xs) / len(all_xs)
             avg_y = sum(all_ys) / len(all_ys)
-            self.city_center = (clamp(avg_x, 2800.0, 5200.0), clamp(avg_y, -2000.0, 2000.0), 0.0)
+            min_cx = self.size_x * 0.14
+            max_cx = self.size_x * 0.28
+            max_cy = self.size_y * 0.12
+            self.city_center = (clamp(avg_x, min_cx, max_cx), clamp(avg_y, -max_cy, max_cy), 0.0)
         else:
-            self.city_center = (4200.0, -200.0, 0.0)
+            self.city_center = (self.size_x * 0.21, -200.0, 0.0)
 
         cx, cy, _ = self.city_center
         b = self.bound
+        sf = self.scale_factor
         random.seed(2026)
 
         # =====================================================================
@@ -147,16 +152,16 @@ class ProceduralCityGenerator:
         # (A) 東西横断大動脈（Trans-Valley Highway）
         # 谷を水平デッキで渡り、都市中心部を経て東へ抜ける大動脈。S字を描いて完全貫通。
         cross_pts = [
-            [-b,         -450.0, 0.0],
-            [-5800.0,    -220.0, 0.0],
-            [-3500.0,     -80.0, 0.0],
+            [-b,         -450.0 * sf, 0.0],
+            [-5800.0 * sf, -220.0, 0.0],
+            [-3500.0 * sf,  -80.0, 0.0],
             [-1800.0,      30.0, 0.0], # 谷の西岸
             [ 1800.0,      30.0, 0.0], # 谷の東岸
             [ cx - 1000.0, cy - 60.0, 0.0],
             [ cx,         cy,        0.0], # 中心大交差点
             [ cx + 1200.0, cy + 90.0, 0.0],
-            [ 6800.0,    -150.0, 0.0],
-            [ b,         -380.0, 0.0]
+            [ 6800.0 * sf, -150.0, 0.0],
+            [ b,         -380.0 * sf, 0.0]
         ]
         smooth_cross = smooth_curve(cross_pts, max_seg_len=55.0, bound=b)
         self.generated_splines.append(smooth_cross)
@@ -167,11 +172,11 @@ class ProceduralCityGenerator:
         # 緩やかな弧を描いて山麓から平野へ縦断
         ns_pts = [
             [cx - 120.0,  b,      0.0],
-            [cx + 90.0,   5500.0, 0.0],
+            [cx + 90.0,   5500.0 * sf, 0.0],
             [cx + 40.0,   cy + 1200.0, 0.0],
             [cx,          cy,     0.0], # 中心交差点
             [cx - 50.0,   cy - 1100.0, 0.0],
-            [cx + 70.0,  -5500.0, 0.0],
+            [cx + 70.0,  -5500.0 * sf, 0.0],
             [cx - 80.0,  -b,      0.0]
         ]
         smooth_ns = smooth_curve(ns_pts, max_seg_len=55.0, bound=b)

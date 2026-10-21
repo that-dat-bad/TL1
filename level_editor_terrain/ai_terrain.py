@@ -7,11 +7,11 @@ import urllib.error
 import textwrap
 
 try:
-    from .terrain_materials import detect_biome, apply_biome_material_to_terrain, detect_road_type, get_or_create_road_material
+    from .terrain_materials import detect_biomes, detect_biome, apply_biome_material_to_terrain, detect_road_type, get_or_create_road_material
 except ImportError:
     import sys
     sys.path.append(os.path.dirname(__file__))
-    from terrain_materials import detect_biome, apply_biome_material_to_terrain, detect_road_type, get_or_create_road_material
+    from terrain_materials import detect_biomes, detect_biome, apply_biome_material_to_terrain, detect_road_type, get_or_create_road_material
 
 try:
     from level_editor_city.create_road import setup_mixed_road_geometry_nodes, setup_road_geometry_nodes
@@ -107,8 +107,18 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
     prompt: bpy.props.StringProperty(
         name="プロンプト",
         description="どのような地形を作りたいか入力してください",
-        default="中央に南北の谷があり、東側の平坦地に道路と街が広がっている20km四方の地形",
+        default="中央に南北の谷があり、東側の平坦地に道路と街が広がっている40km四方の地形",
         maxlen=1024,
+    ) # type: ignore
+
+    terrain_scale: bpy.props.EnumProperty(
+        name="地形スケール",
+        description="地形の全体サイズ（幅×奥行）を選択",
+        items=[
+            ('40KM', "40km 四方 (40,000m × 40,000m: 超広大)", "戦闘機や広域オープンワールド向け広大スケール（推奨）"),
+            ('20KM', "20km 四方 (20,000m × 20,000m: 標準)", "従来の20kmオープンワールドスケール"),
+        ],
+        default='40KM',
     ) # type: ignore
 
     model_name: bpy.props.EnumProperty(
@@ -131,11 +141,12 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
 
     biome: bpy.props.EnumProperty(
         name="バイオーム (質感)",
-        description="地形のマテリアル・環境タイプ（砂漠、雪原、峡谷、火山、草原など）",
+        description="地形のマテリアル・環境タイプ（砂漠、雪原、峡谷、火山、草原、複合など）",
         items=[
-            ('AUTO', "バイオーム: 自動判別 (Auto)", "プロンプトから砂漠・雪原・峡谷・火山・草原を自動判別"),
-            ('DESERT', "砂漠 (Desert)", "オレンジ・黄色の砂紋と赤褐色の崖"),
+            ('AUTO', "バイオーム: 自動判別 (Auto)", "プロンプトから単一または複合バイオームを自動判別"),
+            ('MULTI', "複合大陸 (Multi-Biome)", "標高連動の雪山山頂＋大域ノイズによる草原・砂漠・峡谷の複合バイオーム"),
             ('PLAINS', "草原 (Plains)", "緑豊かな大地と土岩の崖"),
+            ('DESERT', "砂漠 (Desert)", "オレンジ・黄色の砂紋と赤褐色の崖"),
             ('SNOW', "雪原 / 氷河 (Snow)", "白銀の雪原と青暗い岩壁"),
             ('CANYON', "峡谷 (Canyon)", "テラコッタ層の赤土と崖"),
             ('VOLCANO', "火山 / 荒野 (Volcano)", "玄武岩の黒灰と赤黒い岩"),
@@ -185,6 +196,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             box.prop(self, "model_name")
 
         row = layout.row(align=True)
+        row.prop(self, "terrain_scale", text="")
         row.prop(self, "preset", text="")
         row.prop(self, "biome", text="")
         layout.prop(self, "prompt", text="指示")
@@ -208,12 +220,12 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             save_ai_config("gemini_model", self.gemini_model)
             self._thread = threading.Thread(
                 target=self.run_gemini_request,
-                args=(self.gemini_model, key, self.prompt, self.preset)
+                args=(self.gemini_model, key, self.prompt, self.preset, self.terrain_scale)
             )
         else:
             self._thread = threading.Thread(
                 target=self.run_ollama_request,
-                args=(self.model_name, self.prompt, self.preset)
+                args=(self.model_name, self.prompt, self.preset, self.terrain_scale)
             )
 
         self._thread.start()
@@ -239,41 +251,47 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                     has_mountain = any(k in p_lower for k in ["山", "mountain", "峰", "丘", "連峰"])
                     has_city = any(k in p_lower for k in ["平", "フラット", "flat", "plain", "都市", "街", "city"])
 
-                    # プリセットまたはAI解析値からTerrain Heightと初期プリセットを決定 (20kmスケール)
+                    # プリセットまたはAI解析値からTerrain Heightと初期プリセットを決定 (40km / 20kmスケール対応)
+                    is_40km = (self.terrain_scale == '40KM')
+                    default_size = 40000.0 if is_40km else 20000.0
+                    scale_factor = default_size / 20000.0
+
                     if self.preset == 'FLAT':
                         exec_preset = 'FLAT'
                         target_height = 25.0 if has_valley else 5.0
                     elif self.preset == 'HILLS':
                         exec_preset = 'HILLS'
-                        target_height = 100.0
+                        target_height = 120.0 if is_40km else 100.0
                     elif self.preset == 'MOUNTAINS':
                         exec_preset = 'MOUNTAINS'
-                        target_height = 350.0
+                        target_height = 450.0 if is_40km else 350.0
                     else: # AUTO
                         if has_valley and has_city:
                             # 谷と街の複合：街は平坦にしつつ谷底との落差を際立たせるため適度な起伏を設定
-                            target_height = 45.0
+                            target_height = 50.0 if is_40km else 45.0
                             exec_preset = 'HILLS'
                         elif has_city:
                             target_height = 10.0
                             exec_preset = 'FLAT'
                         elif has_mountain:
-                            target_height = 350.0
+                            target_height = 450.0 if is_40km else 350.0
                             exec_preset = 'MOUNTAINS'
                         else:
-                            target_height = 80.0
+                            target_height = 100.0 if is_40km else 80.0
                             exec_preset = 'HILLS'
 
                     self.generate_splines(context, self._result)
-                    bpy.ops.myaddon.myaddon_ot_create_terrain(preset=exec_preset)
+                    init_biome = self.biome if self.biome != 'AUTO' else 'MULTI'
+                    bpy.ops.myaddon.myaddon_ot_create_terrain(preset=exec_preset, biome=init_biome, terrain_scale=self.terrain_scale)
                     
                     terrain_obj = bpy.data.objects.get("Terrain")
                     road_obj = bpy.data.objects.get("RoadPath_AI")
                     
                     # バイオーム（質感・マテリアル）の判定と適用
+                    sub_biomes = detect_biomes(self.prompt, self.biome)
                     detected_biome = detect_biome(self.prompt, self.biome)
                     if terrain_obj:
-                        apply_biome_material_to_terrain(terrain_obj, detected_biome)
+                        apply_biome_material_to_terrain(terrain_obj, detected_biome, sub_biomes=sub_biomes)
 
                     if terrain_obj:
                         mod = terrain_obj.modifiers.get("TerrainGen")
@@ -306,22 +324,22 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                                                     pass
                                 return False
 
-                            set_mod_input(mod, 'Grid Size X', self._result.get("terrain_size_x", 20000.0))
-                            set_mod_input(mod, 'Grid Size Y', self._result.get("terrain_size_y", 20000.0))
+                            set_mod_input(mod, 'Grid Size X', self._result.get("terrain_size_x", default_size))
+                            set_mod_input(mod, 'Grid Size Y', self._result.get("terrain_size_y", default_size))
                             set_mod_input(mod, 'Terrain Height', target_height)
                             
                             # 谷コレクションと山岳コレクションを確実に接続
                             val_col = bpy.data.collections.get("Valleys")
                             if val_col:
                                 set_mod_input(mod, 'Valley Collection', val_col)
-                                set_mod_input(mod, 'Valley Depth', 400.0)   # 20kmスケールの深さ400m
-                                set_mod_input(mod, 'Valley Radius', 1800.0) # 谷の幅 3.6km
+                                set_mod_input(mod, 'Valley Depth', 500.0 if is_40km else 400.0)
+                                set_mod_input(mod, 'Valley Radius', 1800.0 * scale_factor)
 
                             mt_col = bpy.data.collections.get("Mountains")
                             if mt_col:
                                 set_mod_input(mod, 'Mountain Collection', mt_col)
-                                set_mod_input(mod, 'Mountain Height', 450.0)
-                                set_mod_input(mod, 'Mountain Radius', 1400.0)
+                                set_mod_input(mod, 'Mountain Height', 550.0 if is_40km else 450.0)
+                                set_mod_input(mod, 'Mountain Radius', 1400.0 * scale_factor)
 
                             # Roadの割り当てを一時解除（Terrain本来の高さを取得するため）
                             road_input_key = None
@@ -357,7 +375,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                                 try:
                                     lots = self._generator.generate_building_lots()
                                     if lots:
-                                        self.spawn_buildings(context, lots, terrain_obj, detected_biome)
+                                        self.spawn_buildings(context, lots, terrain_obj, detected_biome, sub_biomes=sub_biomes)
                                 except Exception as e:
                                     print(f"Building lot generation failed: {e}")
                             # ----------------------------------------------------------------
@@ -390,7 +408,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                 return {'CANCELLED'}
         return {'PASS_THROUGH'}
 
-    def _add_cube_to_bmesh(self, bm, cx, cy, hw, hh, z_min, z_max, angle=0.0):
+    def _add_cube_to_bmesh(self, bm, cx, cy, hw, hh, z_min, z_max, angle=0.0, mat_index=0):
         import math
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
@@ -418,17 +436,23 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         v7 = bm.verts.new((rc[2][0], rc[2][1], z_max))
         v8 = bm.verts.new((rc[3][0], rc[3][1], z_max))
         
-        bm.faces.new((v1, v4, v3, v2)) # Bottom
-        bm.faces.new((v5, v6, v7, v8)) # Top
-        bm.faces.new((v1, v2, v6, v5)) # Front
-        bm.faces.new((v2, v3, v7, v6)) # Right
-        bm.faces.new((v3, v4, v8, v7)) # Back
-        bm.faces.new((v4, v1, v5, v8)) # Left
+        faces = [
+            bm.faces.new((v1, v4, v3, v2)), # Bottom
+            bm.faces.new((v5, v6, v7, v8)), # Top
+            bm.faces.new((v1, v2, v6, v5)), # Front
+            bm.faces.new((v2, v3, v7, v6)), # Right
+            bm.faces.new((v3, v4, v8, v7)), # Back
+            bm.faces.new((v4, v1, v5, v8)), # Left
+        ]
+        if mat_index > 0:
+            for f in faces:
+                f.material_index = mat_index
 
-    def spawn_buildings(self, context, lots, terrain_obj, biome='PLAINS'):
+    def spawn_buildings(self, context, lots, terrain_obj, biome='PLAINS', sub_biomes=None):
         import bmesh
         import mathutils
         import random
+        import math
         
         # 既存のBuildingsコレクションとオブジェクトをクリア
         build_col = self.get_or_create_collection(context, "Buildings")
@@ -437,6 +461,39 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         mesh = bpy.data.meshes.new("Buildings_AI")
         obj = bpy.data.objects.new("Buildings_AI", mesh)
         build_col.objects.link(obj)
+
+        # マテリアル設定（バイオームに応じた建造物カラー）
+        # MULTIの場合は複数のバイオーム用マテリアルを登録し、立地（標高・位置）に応じて面ごとに割り当て
+        building_palette = {
+            'PLAINS': ((0.85, 0.85, 0.88, 1.0), 0.25),
+            'DESERT': ((0.86, 0.74, 0.58, 1.0), 0.80),
+            'SNOW': ((0.78, 0.82, 0.88, 1.0), 0.35),
+            'CANYON': ((0.75, 0.48, 0.36, 1.0), 0.75),
+            'VOLCANO': ((0.28, 0.28, 0.30, 1.0), 0.60),
+        }
+
+        def get_or_create_building_mat(b_key):
+            mat_name = f"Building_Biome_{b_key}"
+            b_mat = bpy.data.materials.get(mat_name)
+            if not b_mat:
+                b_mat = bpy.data.materials.new(mat_name)
+                b_mat.use_nodes = True
+                bsdf = b_mat.node_tree.nodes.get("Principled BSDF")
+                col, rough = building_palette.get(b_key, building_palette['PLAINS'])
+                if bsdf:
+                    bsdf.inputs["Base Color"].default_value = col
+                    bsdf.inputs["Roughness"].default_value = rough
+                b_mat.diffuse_color = col
+            return b_mat
+
+        is_multi = (biome == 'MULTI') or (sub_biomes and len(sub_biomes) >= 2)
+        if is_multi:
+            # 0: PLAINS, 1: DESERT, 2: SNOW, 3: CANYON, 4: VOLCANO
+            mat_order = ['PLAINS', 'DESERT', 'SNOW', 'CANYON', 'VOLCANO']
+            for k in mat_order:
+                obj.data.materials.append(get_or_create_building_mat(k))
+        else:
+            obj.data.materials.append(get_or_create_building_mat(biome))
         
         bm = bmesh.new()
         
@@ -453,7 +510,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             origin = mathutils.Vector((x, y, 1000.0))
             dir_world = mathutils.Vector((0.0, 0.0, -1.0))
             
-            hit_z = 0
+            hit_z = 0.0
             current_origin = origin
             for _ in range(10):
                 success, loc, _, _, hit_obj, _ = context.scene.ray_cast(depsgraph, current_origin, dir_world)
@@ -472,62 +529,40 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             
             hw = w / 2.0
             hh = h / 2.0
+
+            # 立地（標高・位置）に基づくバイオームマテリアルインデックスの決定
+            mat_idx = 0
+            if is_multi:
+                if hit_z >= 80.0:
+                    mat_idx = 2 # SNOW
+                else:
+                    pos_val = math.sin(x * 0.00025) * math.cos(y * 0.00025)
+                    if pos_val > 0.1:
+                        mat_idx = 1 # DESERT
+                    elif pos_val < -0.35:
+                        mat_idx = 3 # CANYON
+                    else:
+                        mat_idx = 0 # PLAINS
             
             # 高層摩天楼（高さ75m以上）の場合は上部セットバック（段差タワー）を造形
             if z_height >= 75.0 and b_type == 'SKYSCRAPER':
                 base_z = hit_z + z_height * 0.58
-                self._add_cube_to_bmesh(bm, x, y, hw, hh, z_min, base_z, angle=angle)
+                self._add_cube_to_bmesh(bm, x, y, hw, hh, z_min, base_z, angle=angle, mat_index=mat_idx)
                 
                 # 上層タワー（60%幅）
                 tower_hw = hw * 0.62
                 tower_hh = hh * 0.62
-                self._add_cube_to_bmesh(bm, x, y, tower_hw, tower_hh, base_z, z_max, angle=angle)
+                self._add_cube_to_bmesh(bm, x, y, tower_hw, tower_hh, base_z, z_max, angle=angle, mat_index=mat_idx)
                 
                 # 屋上尖塔・アンテナ
                 if random.random() < 0.6:
                     spire_z = z_max + random.uniform(15.0, 35.0)
-                    self._add_cube_to_bmesh(bm, x, y, 2.5, 2.5, z_max, spire_z, angle=angle)
+                    self._add_cube_to_bmesh(bm, x, y, 2.5, 2.5, z_max, spire_z, angle=angle, mat_index=mat_idx)
             else:
-                self._add_cube_to_bmesh(bm, x, y, hw, hh, z_min, z_max, angle=angle)
+                self._add_cube_to_bmesh(bm, x, y, hw, hh, z_min, z_max, angle=angle, mat_index=mat_idx)
             
         bm.to_mesh(mesh)
         bm.free()
-        
-        # マテリアル設定（バイオームに応じた建造物カラー）
-        mat_name = f"Building_Biome_{biome}"
-        mat = bpy.data.materials.get(mat_name)
-        if not mat:
-            mat = bpy.data.materials.new(mat_name)
-            mat.use_nodes = True
-            bsdf = mat.node_tree.nodes.get("Principled BSDF")
-            if bsdf:
-                if biome == 'DESERT':
-                    # 砂漠の街並み: 砂岩・土壁風の明るいベージュ・サンドストーン
-                    bsdf.inputs["Base Color"].default_value = (0.86, 0.74, 0.58, 1.0)
-                    bsdf.inputs["Roughness"].default_value = 0.8
-                    mat.diffuse_color = (0.86, 0.74, 0.58, 1.0)
-                elif biome == 'CANYON':
-                    # 峡谷の街: 赤土・テラコッタレンガ調
-                    bsdf.inputs["Base Color"].default_value = (0.75, 0.48, 0.36, 1.0)
-                    bsdf.inputs["Roughness"].default_value = 0.75
-                    mat.diffuse_color = (0.75, 0.48, 0.36, 1.0)
-                elif biome == 'SNOW':
-                    # 雪原都市: 寒冷地コンクリート・白藍色
-                    bsdf.inputs["Base Color"].default_value = (0.78, 0.82, 0.88, 1.0)
-                    bsdf.inputs["Roughness"].default_value = 0.35
-                    mat.diffuse_color = (0.78, 0.82, 0.88, 1.0)
-                elif biome == 'VOLCANO':
-                    # 火山・荒野: 玄武岩・ダークスレート調
-                    bsdf.inputs["Base Color"].default_value = (0.28, 0.28, 0.30, 1.0)
-                    bsdf.inputs["Roughness"].default_value = 0.6
-                    mat.diffuse_color = (0.28, 0.28, 0.30, 1.0)
-                else: # PLAINS
-                    # 草原・一般: クリーンホワイトモックアップ
-                    bsdf.inputs["Base Color"].default_value = (0.85, 0.85, 0.88, 1.0)
-                    bsdf.inputs["Roughness"].default_value = 0.25
-                    mat.diffuse_color = (0.85, 0.85, 0.88, 1.0)
-        obj.data.materials.append(mat)
-
     def _subdivide_spline(self, pts, max_seg_len=75.0):
         """長すぎる直線セグメントを均等に細分化し、地面への吸着精度を向上させる"""
         import math
@@ -675,12 +710,18 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             in_bridge = False
             b_start = 0
 
+            # 地形サイズに応じた谷判定幅
+            size_ref = 20000.0
+            if terrain_obj and terrain_obj.modifiers.get("TerrainGen"):
+                size_ref = terrain_obj.modifiers["TerrainGen"].get("Grid Size X", 20000.0)
+            valley_threshold_x = 2400.0 * (size_ref / 20000.0)
+
             for i in range(n_pts):
                 x = coords_local[i][0]
                 gz = raw_ground_z[i]
                 
-                # 中央の谷の判定（|x| < 2400 かつ 地面標高が低くなっている）
-                is_valley_area = (abs(x) < 2400.0 and gz < 8.0)
+                # 中央の谷の判定（|x| < valley_threshold_x かつ 地面標高が低くなっている）
+                is_valley_area = (abs(x) < valley_threshold_x and gz < 8.0)
                 
                 if is_valley_area:
                     if not in_bridge:
@@ -748,52 +789,59 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             except Exception as e:
                 print(f"Bridge structure generation failed: {e}")
 
-    def run_gemini_request(self, model_name, api_key, prompt, preset='AUTO'):
+    def run_gemini_request(self, model_name, api_key, prompt, preset='AUTO', terrain_scale='40KM'):
+        is_40km = (terrain_scale == '40KM')
+        scale_str = "40km四方 (40,000m × 40,000m)" if is_40km else "20km四方 (20,000m × 20,000m)"
+        coord_min = -20000 if is_40km else -10000
+        coord_max = 20000 if is_40km else 10000
+        size_val = 40000.0 if is_40km else 20000.0
+        r_step = 2.0 if is_40km else 1.0
+
         preset_hint = ""
         if preset == 'FLAT':
             preset_hint = "\n【ユーザー指定: 平野/街プリセット】terrain_heightは2.0〜10.0の極小値にし、中央を平坦にして街（roads）を広げてください。"
         elif preset == 'HILLS':
-            preset_hint = "\n【ユーザー指定: 丘陵プリセット】terrain_heightは50.0〜120.0程度にしてください。"
+            preset_hint = f"\n【ユーザー指定: 丘陵プリセット】terrain_heightは{int(50.0*r_step)}〜{int(120.0*r_step)}程度にしてください。"
         elif preset == 'MOUNTAINS':
-            preset_hint = "\n【ユーザー指定: 山岳プリセット】terrain_heightは200.0〜500.0程度にしてください。"
+            preset_hint = f"\n【ユーザー指定: 山岳プリセット】terrain_heightは{int(200.0*r_step)}〜{int(500.0*r_step)}程度にしてください。"
             
         user_content = prompt + preset_hint
         
-        system_instruction = textwrap.dedent("""\
+        system_instruction = textwrap.dedent(f"""\
             あなたはBlenderの3D地形・都市生成AIアシスタントです。
-            全体サイズはデフォルトで20km四方 (20,000m × 20,000m) のオープンワールド規模です。
+            全体サイズはデフォルトで{scale_str}のオープンワールド規模です。
             ユーザーの要望に基づき、山脈(mountains)、谷(valleys)、道路(roads)、ベース起伏の強さ(terrain_height)の座標データをJSON形式で出力してください。
             
-            [座標系 (20km四方)]
-            - X: 左右 (西がマイナス [-10000..0], 東がプラス [0..10000])
-            - Y: 前後 (南がマイナス [-10000..0], 北がプラス [0..10000])
+            [座標系 ({scale_str})]
+            - X: 左右 (西がマイナス [{coord_min}..0], 東がプラス [0..{coord_max}])
+            - Y: 前後 (南がマイナス [{coord_min}..0], 北がプラス [0..{coord_max}])
             - Z: 高さ (通常は0)
             
             [重要ルール]
-            1. 街・都市・建物群: 街や建物は道路(roads)の周囲に自動生成されます。ユーザーが「東側に街」「中央にビル街」のように特定エリアに街や建物を求めた場合、必ずそのエリアに道路(roads)を配置してください（例: 東側なら X: 2000〜8000 の範囲に道路を引く）。
+            1. 街・都市・建物群: 街や建物は道路(roads)の周囲に自動生成されます。ユーザーが「東側に街」「中央にビル街」のように特定エリアに街や建物を求めた場合、必ずそのエリアに道路(roads)を配置してください（例: 東側なら X: {int(2000*r_step)}〜{int(8000*r_step)} の範囲に道路を引く）。
             2. 谷・山脈: 「中央」に谷や山を置く場合は座標の X または Y を 0 付近に配置してください。東西南北の指定があれば座標系に従って配置してください。
             3. terrain_height (ベース起伏の強さ):
                - 平野、街、都市、広場: 2.0 〜 10.0 (街のエリアを山や谷で分断しないこと)
-               - なだらかな丘陵: 50.0 〜 120.0
-               - 険しい山岳・深い渓谷: 200.0 〜 500.0
+               - なだらかな丘陵: {int(50.0*r_step)} 〜 {int(120.0*r_step)}
+               - 険しい山岳・深い渓谷: {int(200.0*r_step)} 〜 {int(500.0*r_step)}
             4. 道路・山脈・谷は直線ではなく、自然に曲がりくねった形状になるよう1本あたり4〜6点の制御点を持たせてください。
             5. 不要な要素（平野で谷がない場合など）は空リスト [] としてください。
             
-            [出力JSONスキーマ例 (20km規模)]
-            {
-              "terrain_size_x": 20000.0,
-              "terrain_size_y": 20000.0,
+            [出力JSONスキーマ例]
+            {{
+              "terrain_size_x": {size_val},
+              "terrain_size_y": {size_val},
               "terrain_height": 5.0,
               "mountains": [
-                [[-4000, 3000, 0], [-1500, 4500, 0], [1000, 2500, 0], [3500, 4000, 0]]
+                [[{-4000*r_step}, {3000*r_step}, 0], [{-1500*r_step}, {4500*r_step}, 0], [{1000*r_step}, {2500*r_step}, 0], [{3500*r_step}, {4000*r_step}, 0]]
               ],
               "valleys": [
-                [[-2000, -4000, 0], [-500, -2000, 0], [1500, -3500, 0], [4000, -1500, 0]]
+                [[{-2000*r_step}, {-4000*r_step}, 0], [{-500*r_step}, {-2000*r_step}, 0], [{1500*r_step}, {-3500*r_step}, 0], [{4000*r_step}, {-1500*r_step}, 0]]
               ],
               "roads": [
-                [[-10000, 1000, 0], [-4000, -1000, 0], [0, 500, 0], [5000, -500, 0], [10000, 0, 0]]
+                [[{coord_min}, {1000*r_step}, 0], [{-4000*r_step}, {-1000*r_step}, 0], [0, {500*r_step}, 0], [{500*r_step}, {-500*r_step}, 0], [{coord_max}, 0, 0]]
               ]
-            }
+            }}
         """)
 
         payload = {
@@ -888,7 +936,14 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                 self._error = f"エラーが発生しました: {e}"
                 return
 
-    def run_ollama_request(self, model_name, prompt, preset='AUTO'):
+    def run_ollama_request(self, model_name, prompt, preset='AUTO', terrain_scale='40KM'):
+        is_40km = (terrain_scale == '40KM')
+        scale_str = "40km x 40km (40,000m x 40,000m)" if is_40km else "20km x 20km (20,000m x 20,000m)"
+        coord_min = -20000 if is_40km else -10000
+        coord_max = 20000 if is_40km else 10000
+        size_val = 40000.0 if is_40km else 20000.0
+        r_step = 2.0 if is_40km else 1.0
+
         url = "http://localhost:11434/api/generate"
         
         # --- 自動翻訳処理 ---
@@ -919,58 +974,58 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         if preset == 'FLAT':
             prompt += "\n[Requirement: The user selected FLAT / CITY preset. Keep terrain_height very low (0.0 to 1.5). Do not place mountains in the central area.]"
         elif preset == 'HILLS':
-            prompt += "\n[Requirement: The user selected HILLS preset. Keep terrain_height moderate (50.0 to 120.0).]"
+            prompt += f"\n[Requirement: The user selected HILLS preset. Keep terrain_height moderate ({int(50.0*r_step)} to {int(120.0*r_step)}).]"
         elif preset == 'MOUNTAINS':
-            prompt += "\n[Requirement: The user selected MOUNTAINS preset. Keep terrain_height high (200.0 to 500.0).]"
+            prompt += f"\n[Requirement: The user selected MOUNTAINS preset. Keep terrain_height high ({int(200.0*r_step)} to {int(500.0*r_step)}).]"
         
-        system_prompt = textwrap.dedent("""\
+        system_prompt = textwrap.dedent(f"""\
             You are a terrain generation assistant for Blender.
-            The default terrain size is 20km x 20km (20,000m x 20,000m) open-world scale.
+            The default terrain size is {scale_str} open-world scale.
             Output the placement of terrain elements (mountains, valleys, roads) and base roughness in JSON format based on the user's request.
-            Coordinate system (20km scale):
-            - X: Left/Right (West is negative X [-10000..0], East is positive X [0..10000])
-            - Y: Front/Back (South is negative Y [-10000..0], North is positive Y [0..10000])
+            Coordinate system ({scale_str}):
+            - X: Left/Right (West is negative X [{coord_min}..0], East is positive X [0..{coord_max}])
+            - Y: Front/Back (South is negative Y [{coord_min}..0], North is positive Y [0..{coord_max}])
             - Z: Height (Base Z is usually 0)
             
             [Output Format and Rules]
             - Output ONLY valid JSON. Do NOT include markdown formatting (like ```json), explanations, or conversational text.
-            - Cities and Buildings: Cities and buildings are automatically constructed around roads. When the user asks for a "city", "town", or "buildings" in a specific area (e.g., "east side"), you MUST place the road(s) in that area (e.g. X: 2000..8000 for East) so that the procedural city generator can spawn buildings there.
+            - Cities and Buildings: Cities and buildings are automatically constructed around roads. When the user asks for a "city", "town", or "buildings" in a specific area (e.g., "east side"), you MUST place the road(s) in that area (e.g. X: {int(2000*r_step)}..{int(8000*r_step)} for East) so that the procedural city generator can spawn buildings there.
             - Valleys & Mountains: When placing a valley or mountain in the "center", keep its X or Y coordinates near 0. For north/south/east/west, align coordinates accordingly.
             - terrain_height: Controls the overall base elevation/roughness.
               * Flat plains, city, plaza, or buildable space: 2.0 - 10.0. Avoid placing mountains/valleys directly through the city area.
-              * Rolling hills: 50.0 - 120.0.
-              * Rugged mountains or deep canyons: 200.0 - 500.0.
+              * Rolling hills: {int(50.0*r_step)} - {int(120.0*r_step)}.
+              * Rugged mountains or deep canyons: {int(200.0*r_step)} - {int(500.0*r_step)}.
             - To avoid unnatural straight lines, ensure the coordinates for roads, mountains, and valleys are naturally curved or zig-zagged.
             - Provide about 4 to 6 control points per curve to express natural winding shapes.
             - If an element is not needed, provide an empty list [].
             
-            [Example 1: Flat City / Plains (20km)]
-            {
-              "terrain_size_x": 20000.0,
-              "terrain_size_y": 20000.0,
+            [Example 1: Flat City / Plains]
+            {{
+              "terrain_size_x": {size_val},
+              "terrain_size_y": {size_val},
               "terrain_height": 5.0,
               "mountains": [],
               "valleys": [],
               "roads": [
-                [[-10000, 1000, 0], [-4000, -1000, 0], [0, 500, 0], [5000, -500, 0], [10000, 0, 0]]
+                [[{coord_min}, {1000*r_step}, 0], [{-4000*r_step}, {-1000*r_step}, 0], [0, {500*r_step}, 0], [{5000*r_step}, {-500*r_step}, 0], [{coord_max}, 0, 0]]
               ]
-            }
+            }}
 
-            [Example 2: Mountainous Valley (20km)]
-            {
-              "terrain_size_x": 20000.0,
-              "terrain_size_y": 20000.0,
-              "terrain_height": 250.0,
+            [Example 2: Mountainous Valley]
+            {{
+              "terrain_size_x": {size_val},
+              "terrain_size_y": {size_val},
+              "terrain_height": {250.0*r_step},
               "mountains": [
-                [[-4000, 3000, 0], [-1500, 4500, 0], [1000, 2500, 0], [3500, 4000, 0]]
+                [[{-4000*r_step}, {3000*r_step}, 0], [{-1500*r_step}, {4500*r_step}, 0], [{1000*r_step}, {2500*r_step}, 0], [{3500*r_step}, {4000*r_step}, 0]]
               ],
               "valleys": [
-                [[-2000, -4000, 0], [-500, -2000, 0], [1500, -3500, 0], [4000, -1500, 0]]
+                [[{-2000*r_step}, {-4000*r_step}, 0], [{-500*r_step}, {-2000*r_step}, 0], [{1500*r_step}, {-3500*r_step}, 0], [{4000*r_step}, {-1500*r_step}, 0]]
               ],
               "roads": [
-                [[-10000, 1000, 0], [-5000, -2000, 0], [0, 1500, 0], [6000, -1000, 0], [10000, 0, 0]]
+                [[{coord_min}, {1000*r_step}, 0], [{-5000*r_step}, {-2000*r_step}, 0], [0, {1500*r_step}, 0], [{6000*r_step}, {-1000*r_step}, 0], [{coord_max}, 0, 0]]
               ]
-            }
+            }}
         """)
 
         data = {
@@ -1038,29 +1093,35 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         
         p_lower = (self.prompt or "").lower()
 
+        # スケール係数の取得 (40km / 20km)
+        size_x = float(terrain_data.get("terrain_size_x", 40000.0 if getattr(self, 'terrain_scale', '40KM') == '40KM' else 20000.0))
+        size_y = float(terrain_data.get("terrain_size_y", size_x))
+        scale_f = size_x / 20000.0
+        clamp_limit = (size_x / 2.0) * 0.88
+
         # --- 谷データの取得とプロンプトスマート補完 ---
         valleys = terrain_data.get("valleys", [])
         # プロンプトに谷が指定されていてデータが空、または短すぎる場合は高精度スプラインを自動補完
         if any(k in p_lower for k in ["谷", "キャニオン", "canyon", "valley", "渓谷"]):
             if not valleys or len(valleys[0]) < 2:
                 if "南北" in p_lower or "中央" in p_lower:
-                    # 中央を南北に蛇行して縦断する雄大な大峡谷スプライン (20kmスケール, 区域内クランプ)
+                    # 中央を南北に蛇行して縦断する雄大な大峡谷スプライン (40km/20kmスケール対応)
                     valleys = [[
-                        [-250.0, -8800.0, 0.0],
-                        [400.0,  -5500.0, 0.0],
-                        [-300.0, -2000.0, 0.0],
-                        [350.0,   2500.0, 0.0],
-                        [-200.0,  6000.0, 0.0],
-                        [100.0,   8800.0, 0.0]
+                        [-250.0 * scale_f, -8800.0 * scale_f, 0.0],
+                        [ 400.0 * scale_f, -5500.0 * scale_f, 0.0],
+                        [-300.0 * scale_f, -2000.0 * scale_f, 0.0],
+                        [ 350.0 * scale_f,  2500.0 * scale_f, 0.0],
+                        [-200.0 * scale_f,  6000.0 * scale_f, 0.0],
+                        [ 100.0 * scale_f,  8800.0 * scale_f, 0.0]
                     ]]
                 elif "東西" in p_lower:
                     valleys = [[
-                        [-8800.0, -250.0, 0.0],
-                        [-5500.0,  400.0, 0.0],
-                        [-2000.0, -300.0, 0.0],
-                        [ 2500.0,  350.0, 0.0],
-                        [ 6000.0, -200.0, 0.0],
-                        [ 8800.0,  100.0, 0.0]
+                        [-8800.0 * scale_f, -250.0 * scale_f, 0.0],
+                        [-5500.0 * scale_f,  400.0 * scale_f, 0.0],
+                        [-2000.0 * scale_f, -300.0 * scale_f, 0.0],
+                        [ 2500.0 * scale_f,  350.0 * scale_f, 0.0],
+                        [ 6000.0 * scale_f, -200.0 * scale_f, 0.0],
+                        [ 8800.0 * scale_f,  100.0 * scale_f, 0.0]
                     ]]
 
         # --- 道路データの取得とプロンプトスマート補完 ---
@@ -1068,26 +1129,26 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         if any(k in p_lower for k in ["街", "都市", "道", "道路", "city", "road"]):
             if not roads or len(roads[0]) < 2:
                 if "東" in p_lower:
-                    # 東側 (X: 3500〜4500) に幹線大通り
+                    # 東側 (X: 3500〜4500 * scale_f) に幹線大通り
                     roads = [[
-                        [4000.0, -8500.0, 0.0],
-                        [4200.0, -3500.0, 0.0],
-                        [3900.0,  2500.0, 0.0],
-                        [4100.0,  8500.0, 0.0]
+                        [4000.0 * scale_f, -8500.0 * scale_f, 0.0],
+                        [4200.0 * scale_f, -3500.0 * scale_f, 0.0],
+                        [3900.0 * scale_f,  2500.0 * scale_f, 0.0],
+                        [4100.0 * scale_f,  8500.0 * scale_f, 0.0]
                     ]]
                 elif "西" in p_lower:
                     roads = [[
-                        [-4000.0, -8500.0, 0.0],
-                        [-4200.0, -3500.0, 0.0],
-                        [-3900.0,  2500.0, 0.0],
-                        [-4100.0,  8500.0, 0.0]
+                        [-4000.0 * scale_f, -8500.0 * scale_f, 0.0],
+                        [-4200.0 * scale_f, -3500.0 * scale_f, 0.0],
+                        [-3900.0 * scale_f,  2500.0 * scale_f, 0.0],
+                        [-4100.0 * scale_f,  8500.0 * scale_f, 0.0]
                     ]]
                 else:
                     roads = [[
-                        [-8500.0, 500.0, 0.0],
-                        [-3000.0, -200.0, 0.0],
-                        [ 3000.0,  400.0, 0.0],
-                        [ 8500.0, -100.0, 0.0]
+                        [-8500.0 * scale_f,  500.0 * scale_f, 0.0],
+                        [-3000.0 * scale_f, -200.0 * scale_f, 0.0],
+                        [ 3000.0 * scale_f,  400.0 * scale_f, 0.0],
+                        [ 8500.0 * scale_f, -100.0 * scale_f, 0.0]
                     ]]
 
         # --- Procedural City Generation (Step 1: City District & Grid Roads) ---
@@ -1095,8 +1156,8 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             try:
                 from level_editor_city.city_generator import ProceduralCityGenerator
                 self._generator = ProceduralCityGenerator(
-                    terrain_size_x=terrain_data.get("terrain_size_x", 20000.0),
-                    terrain_size_y=terrain_data.get("terrain_size_y", 20000.0)
+                    terrain_size_x=size_x,
+                    terrain_size_y=size_y
                 )
                 roads = self._generator.generate_road_network(roads, terrain_data=terrain_data)
             except Exception as e:
@@ -1116,12 +1177,13 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             context.view_layer.objects.active = road_obj
             road_obj.select_set(True)
 
-            detected_biome = detect_biome(self.prompt)
+            sub_biomes = detect_biomes(self.prompt, self.biome)
+            detected_biome = detect_biome(self.prompt, self.biome)
             # 街路・小道の道路タイプを自動判定（砂漠なら砂道、プロンプトで砂利道なら砂利道）
             sub_road_type = detect_road_type(self.prompt, detected_biome)
             if sub_road_type == 'ASPHALT':
                 # ユーザーの「混在させて」の要望に応え、街路・小道に砂道または砂利道を混在
-                if detected_biome == 'DESERT':
+                if detected_biome == 'DESERT' or (sub_biomes and 'DESERT' in sub_biomes):
                     sub_road_type = 'SAND_DIRT'
                 elif any(k in (self.prompt or "").lower() for k in ["砂道", "砂利", "ダート"]):
                     sub_road_type = 'SAND_DIRT'
@@ -1175,8 +1237,8 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             spline = curve.splines.new('BEZIER')
             spline.bezier_points.add(len(pts) - 1)
             for i, p in enumerate(pts):
-                cx = max(-8800.0, min(8800.0, p[0]))
-                cy = max(-8800.0, min(8800.0, p[1]))
+                cx = max(-clamp_limit, min(clamp_limit, p[0]))
+                cy = max(-clamp_limit, min(clamp_limit, p[1]))
                 spline.bezier_points[i].co = (cx, cy, p[2])
                 spline.bezier_points[i].handle_left_type = 'AUTO'
                 spline.bezier_points[i].handle_right_type = 'AUTO'
@@ -1192,8 +1254,8 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             spline = curve.splines.new('BEZIER')
             spline.bezier_points.add(len(pts) - 1)
             for i, p in enumerate(pts):
-                cx = max(-8800.0, min(8800.0, p[0]))
-                cy = max(-8800.0, min(8800.0, p[1]))
+                cx = max(-clamp_limit, min(clamp_limit, p[0]))
+                cy = max(-clamp_limit, min(clamp_limit, p[1]))
                 spline.bezier_points[i].co = (cx, cy, p[2])
                 spline.bezier_points[i].handle_left_type = 'AUTO'
                 spline.bezier_points[i].handle_right_type = 'AUTO'
