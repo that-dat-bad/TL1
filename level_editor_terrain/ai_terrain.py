@@ -297,31 +297,48 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                         mod = terrain_obj.modifiers.get("TerrainGen")
                         if mod:
                             def set_mod_input(m, name, val):
-                                if val is None:
+                                if val is None or m is None:
                                     return False
-                                if name in m:
-                                    try:
-                                        m[name] = val
-                                        return True
-                                    except:
-                                        pass
-                                if hasattr(m, "node_group") and m.node_group:
-                                    if hasattr(m.node_group, "interface"):
-                                        for item in m.node_group.interface.items_tree:
+                                grp = getattr(m, 'node_group', None)
+                                # 1. Blender 5.x+: m.properties.inputs[identifier].value = val
+                                if hasattr(m, 'properties') and hasattr(m.properties, 'inputs'):
+                                    inputs_obj = m.properties.inputs
+                                    if grp and hasattr(grp, "interface"):
+                                        for item in grp.interface.items_tree:
+                                            if getattr(item, 'item_type', '') == 'SOCKET' and item.in_out == 'INPUT' and item.name == name:
+                                                ident = getattr(item, 'identifier', '')
+                                                if ident and hasattr(inputs_obj, ident):
+                                                    try:
+                                                        sock = getattr(inputs_obj, ident)
+                                                        if hasattr(sock, 'value'):
+                                                            sock.value = val
+                                                            return True
+                                                    except Exception:
+                                                        pass
+                                # 2. Blender 4.x / 3.x: m[identifier] = val
+                                if grp:
+                                    if hasattr(grp, "interface"):
+                                        for item in grp.interface.items_tree:
                                             if getattr(item, 'item_type', '') == 'SOCKET' and item.in_out == 'INPUT' and item.name == name:
                                                 try:
                                                     m[item.identifier] = val
                                                     return True
-                                                except:
+                                                except Exception:
                                                     pass
-                                    elif hasattr(m.node_group, "inputs"):
-                                        for item in m.node_group.inputs:
+                                    elif hasattr(grp, "inputs"):
+                                        for item in grp.inputs:
                                             if item.name == name:
                                                 try:
                                                     m[item.identifier] = val
                                                     return True
-                                                except:
+                                                except Exception:
                                                     pass
+                                # 3. Fallback
+                                try:
+                                    m[name] = val
+                                    return True
+                                except Exception:
+                                    pass
                                 return False
 
                             set_mod_input(mod, 'Grid Size X', self._result.get("terrain_size_x", default_size))
@@ -342,14 +359,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                                 set_mod_input(mod, 'Mountain Radius', 1400.0 * scale_factor)
 
                             # Roadの割り当てを一時解除（Terrain本来の高さを取得するため）
-                            road_input_key = None
-                            for key in mod.keys():
-                                try:
-                                    if mod[key] == road_obj:
-                                        road_input_key = key
-                                        mod[key] = None
-                                except:
-                                    pass
+                            set_mod_input(mod, 'Road Object', None)
                                     
                             # Terrainの高さをRoadに投影
                             if road_obj:
@@ -381,16 +391,8 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                             # ----------------------------------------------------------------
                                 
                             # RoadをTerrainに割り当て直す
-                            if road_input_key:
-                                mod[road_input_key] = road_obj
-                            else:
-                                try:
-                                    mod["Socket_1"] = road_obj
-                                except:
-                                    try:
-                                        mod["Road Object"] = road_obj
-                                    except:
-                                        pass
+                            if road_obj:
+                                set_mod_input(mod, 'Road Object', road_obj)
 
                     # 3Dビューポートをマテリアルプレビューに切り替え、美しい景観を即座に表示
                     try:
@@ -713,7 +715,28 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             # 地形サイズに応じた谷判定幅
             size_ref = 20000.0
             if terrain_obj and terrain_obj.modifiers.get("TerrainGen"):
-                size_ref = terrain_obj.modifiers["TerrainGen"].get("Grid Size X", 20000.0)
+                mod = terrain_obj.modifiers.get("TerrainGen")
+                if hasattr(mod, 'properties') and hasattr(mod.properties, 'inputs'):
+                    inputs_obj = mod.properties.inputs
+                    grp = getattr(mod, 'node_group', None)
+                    if grp and hasattr(grp, "interface"):
+                        for item in grp.interface.items_tree:
+                            if getattr(item, 'item_type', '') == 'SOCKET' and item.name == 'Grid Size X':
+                                ident = getattr(item, 'identifier', '')
+                                if ident and hasattr(inputs_obj, ident):
+                                    sock = getattr(inputs_obj, ident)
+                                    val = getattr(sock, 'value', sock)
+                                    if val:
+                                        try:
+                                            size_ref = float(val)
+                                        except Exception:
+                                            pass
+                                    break
+                else:
+                    try:
+                        size_ref = float(mod.get("Grid Size X", 20000.0))
+                    except Exception:
+                        pass
             valley_threshold_x = 2400.0 * (size_ref / 20000.0)
 
             for i in range(n_pts):

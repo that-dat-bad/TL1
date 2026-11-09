@@ -906,30 +906,46 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
         # モディファイア入力値にプリセット値および既存コレクションを明示的に反映
         def set_gn_input(m, grp, name, val):
-            if val is None:
+            if val is None or m is None:
                 return False
-            if name in m:
-                try:
-                    m[name] = val
-                    return True
-                except:
-                    pass
-            if hasattr(grp, "interface"):
+            # 1. Blender 5.x+: m.properties.inputs[identifier].value = val
+            if hasattr(m, 'properties') and hasattr(m.properties, 'inputs'):
+                inputs_obj = m.properties.inputs
+                if grp and hasattr(grp, "interface"):
+                    for item in grp.interface.items_tree:
+                        if getattr(item, 'item_type', '') == 'SOCKET' and item.in_out == 'INPUT' and item.name == name:
+                            ident = getattr(item, 'identifier', '')
+                            if ident and hasattr(inputs_obj, ident):
+                                try:
+                                    sock = getattr(inputs_obj, ident)
+                                    if hasattr(sock, 'value'):
+                                        sock.value = val
+                                        return True
+                                except Exception:
+                                    pass
+            # 2. Blender 4.x / 3.x: m[identifier] = val
+            if grp and hasattr(grp, "interface"):
                 for item in grp.interface.items_tree:
                     if getattr(item, 'item_type', '') == 'SOCKET' and item.in_out == 'INPUT' and item.name == name:
                         try:
                             m[item.identifier] = val
                             return True
-                        except:
+                        except Exception:
                             pass
-            elif hasattr(grp, "inputs"):
+            elif grp and hasattr(grp, "inputs"):
                 for item in grp.inputs:
                     if item.name == name:
                         try:
                             m[item.identifier] = val
                             return True
-                        except:
+                        except Exception:
                             pass
+            # 3. Fallback
+            try:
+                m[name] = val
+                return True
+            except Exception:
+                pass
             return False
 
         set_gn_input(gn_mod, group, 'Terrain Height', preset_height)

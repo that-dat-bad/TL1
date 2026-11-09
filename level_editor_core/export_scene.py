@@ -173,14 +173,31 @@ class MYADDON_OT_export_scene(bpy.types.Operator, bpy_extras.io_utils.ExportHelp
 class MYADDON_OT_export_chunks(bpy.types.Operator, bpy_extras.io_utils.ExportHelper):
     bl_idname = "myaddon.myaddon_ot_export_chunks"
     bl_label = "チャンクエクスポート (OBJ)"
-    bl_description = "メッシュを500m単位のチャンクに分割してOBJエクスポートします"
+    bl_description = "メッシュを指定サイズのチャンクに分割してOBJエクスポートします"
     filename_ext = ""
 
-    # チャンクサイズ
-    chunk_size = 500.0
+    # チャンクサイズ（従来の500mから荒くした2000mをデフォルトに設定）
+    chunk_size: bpy.props.FloatProperty(
+        name="チャンクサイズ (m)",
+        description="1チャンクの一辺の長さ (m)。従来の500mから荒くした2000m推奨",
+        default=2000.0,
+        min=100.0,
+        max=40000.0,
+    ) # type: ignore
+
+    export_lod: bpy.props.BoolProperty(
+        name="LODを出力",
+        description="LOD0〜LOD3のポリゴン削減モデルを生成して出力するかどうか（一時無効化時はFalse）",
+        default=False,
+    ) # type: ignore
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "chunk_size")
+        layout.prop(self, "export_lod")
 
     def execute(self, context):
-        print("チャンク並行エクスポートを開始します")
+        print(f"チャンク並行エクスポートを開始します (サイズ: {self.chunk_size}m, LOD: {self.export_lod})")
         
         export_dir = os.path.dirname(self.filepath)
         if not export_dir:
@@ -255,7 +272,8 @@ class MYADDON_OT_export_chunks(bpy.types.Operator, bpy_extras.io_utils.ExportHel
                 export_dir, 
                 str(self.chunk_size), 
                 str(start_cx), 
-                str(start_cy)
+                str(start_cy),
+                str(self.export_lod)
             ]
             p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             processes.append(p)
@@ -304,6 +322,7 @@ export_dir = argv[1]
 chunk_size = float(argv[2])
 start_cx = int(argv[3])
 start_cy = int(argv[4])
+export_lod = (argv[5].lower() == 'true') if len(argv) > 5 else False
 
 with open(batch_json, 'r') as f:
     chunks = json.load(f)
@@ -368,8 +387,9 @@ links.new(delete_geo.outputs[0], node_out.inputs[0])
 modifiers = []
 lod_modifiers = []
 for obj in mesh_objs:
-    lod_mod = obj.modifiers.new(name="TempLOD", type='DECIMATE')
-    lod_modifiers.append((obj, lod_mod))
+    if export_lod:
+        lod_mod = obj.modifiers.new(name="TempLOD", type='DECIMATE')
+        lod_modifiers.append((obj, lod_mod))
     mod = obj.modifiers.new(name="TempChunkSplitter", type='NODES')
     mod.node_group = group
     modifiers.append((obj, mod))
@@ -377,7 +397,10 @@ for obj in mesh_objs:
 depsgraph = bpy.context.evaluated_depsgraph_get()
 
 chunk_info_list = []
-lods_config = [(0, 1.0), (1, 0.5), (2, 0.2), (3, 0.05)]
+if export_lod:
+    lods_config = [(0, 1.0), (1, 0.5), (2, 0.2), (3, 0.05)]
+else:
+    lods_config = [(0, 1.0)]
 
 for cx, cy in chunks:
     chunk_min_x = cx * chunk_size
@@ -431,7 +454,8 @@ for cx, cy in chunks:
         "min_x": chunk_min_x, "max_x": chunk_max_x,
         "min_y": chunk_min_y, "max_y": chunk_max_y,
         "center": [(chunk_min_x + chunk_max_x) / 2.0, (chunk_min_y + chunk_max_y) / 2.0, 0.0],
-        "lod_files": chunk_files
+        "lod_files": chunk_files,
+        "file": chunk_files[0] if chunk_files else ""
     })
 
 res_json = batch_json.replace(".json", "_result.json")

@@ -85,7 +85,10 @@ def setup_road_geometry_nodes(curve_obj, road_type='ASPHALT', lane_count=2, lane
 
     # Fillet Curve
     fillet_curve = nodes.new('GeometryNodeFilletCurve')
-    fillet_curve.mode = 'POLY'
+    if hasattr(fillet_curve, 'mode'):
+        fillet_curve.mode = 'POLY'
+    elif 'Mode' in fillet_curve.inputs:
+        fillet_curve.inputs['Mode'].default_value = 'Poly'
     fillet_curve.inputs['Count'].default_value = 16
     fillet_curve.inputs['Limit Radius'].default_value = True
     fillet_curve.location = (-400, 100)
@@ -242,7 +245,10 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
 
     # 2. 幹線（Selection: radius > 0.75）の処理
     fillet_main = nodes.new('GeometryNodeFilletCurve')
-    fillet_main.mode = 'POLY'
+    if hasattr(fillet_main, 'mode'):
+        fillet_main.mode = 'POLY'
+    elif 'Mode' in fillet_main.inputs:
+        fillet_main.inputs['Mode'].default_value = 'Poly'
     fillet_main.inputs['Count'].default_value = 16
     fillet_main.inputs['Limit Radius'].default_value = True
     fillet_main.inputs['Radius'].default_value = main_width * 0.8
@@ -304,7 +310,10 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
 
     # 3. 街路・小道（Inverted: radius <= 0.75）の処理
     fillet_sub = nodes.new('GeometryNodeFilletCurve')
-    fillet_sub.mode = 'POLY'
+    if hasattr(fillet_sub, 'mode'):
+        fillet_sub.mode = 'POLY'
+    elif 'Mode' in fillet_sub.inputs:
+        fillet_sub.inputs['Mode'].default_value = 'Poly'
     fillet_sub.inputs['Count'].default_value = 16
     fillet_sub.inputs['Limit Radius'].default_value = True
     fillet_sub.inputs['Radius'].default_value = sub_width * 0.8
