@@ -89,6 +89,14 @@ def set_modifier_input(mod, name_or_id, value):
     if not mod:
         return False
 
+    def _tag_update(m):
+        id_data = getattr(m, 'id_data', None)
+        if id_data is not None and hasattr(id_data, 'update_tag'):
+            try:
+                id_data.update_tag()
+            except Exception:
+                pass
+
     identifier = find_input_identifier(mod, name_or_id)
 
     # Blender 5.x: mod.properties.inputs
@@ -104,22 +112,26 @@ def set_modifier_input(mod, name_or_id, value):
             if hasattr(target, 'value'):
                 try:
                     target.value = value
+                    _tag_update(mod)
                     return True
                 except Exception:
                     pass
             if hasattr(target, 'keys') and 'value' in target.keys():
                 try:
                     target['value'] = value
+                    _tag_update(mod)
                     return True
                 except Exception:
                     pass
             else:
                 try:
                     setattr(inputs, identifier, value)
+                    _tag_update(mod)
                     return True
                 except Exception:
                     try:
                         inputs[identifier] = value
+                        _tag_update(mod)
                         return True
                     except Exception:
                         pass
@@ -127,12 +139,14 @@ def set_modifier_input(mod, name_or_id, value):
     # Blender 4.x 以前: mod[identifier] = value または mod[name_or_id] = value
     try:
         mod[identifier] = value
+        _tag_update(mod)
         return True
     except Exception:
         pass
 
     try:
         mod[name_or_id] = value
+        _tag_update(mod)
         return True
     except Exception:
         pass

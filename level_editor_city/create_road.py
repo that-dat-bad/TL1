@@ -244,16 +244,25 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
     links.new(compare_node.outputs[0], sep_geom.inputs['Selection'])
 
     # 2. 幹線（Selection: radius > 0.75）の処理
-    fillet_main = nodes.new('GeometryNodeFilletCurve')
-    if hasattr(fillet_main, 'mode'):
-        fillet_main.mode = 'POLY'
-    elif 'Mode' in fillet_main.inputs:
-        fillet_main.inputs['Mode'].default_value = 'Poly'
-    fillet_main.inputs['Count'].default_value = 16
-    fillet_main.inputs['Limit Radius'].default_value = True
-    fillet_main.inputs['Radius'].default_value = main_width * 0.8
-    fillet_main.location = (-350, 200)
-    links.new(sep_geom.outputs['Selection'], fillet_main.inputs['Curve'])
+    # すでにPython側で平滑化・リサンプリング済みのため、自己交差と接線反転を引き起こす FilletCurve を廃止し、
+    # 均一リサンプリング (18.0m) と Z_UP 法線固定を適用してねじれ・三角形スパイクを防止する
+    resample_main = nodes.new('GeometryNodeResampleCurve')
+    if hasattr(resample_main, 'mode'):
+        resample_main.mode = 'LENGTH'
+    elif 'Mode' in resample_main.inputs:
+        resample_main.inputs['Mode'].default_value = 'Length'
+    if 'Length' in resample_main.inputs:
+        resample_main.inputs['Length'].default_value = 18.0
+    resample_main.location = (-420, 200)
+    links.new(sep_geom.outputs['Selection'], resample_main.inputs['Curve'])
+
+    normal_main = nodes.new('GeometryNodeSetCurveNormal')
+    if hasattr(normal_main, 'mode'):
+        normal_main.mode = 'Z_UP'
+    elif 'Mode' in normal_main.inputs:
+        normal_main.inputs['Mode'].default_value = 'Z Up'
+    normal_main.location = (-260, 200)
+    links.new(resample_main.outputs['Curve'], normal_main.inputs['Curve'])
 
     curve_to_mesh_main = nodes.new('GeometryNodeCurveToMesh')
     curve_to_mesh_main.location = (-100, 200)
@@ -261,7 +270,7 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
     prof_line_main.inputs['Start'].default_value = (main_width / 2.0, 0, 0)
     prof_line_main.inputs['End'].default_value = (-main_width / 2.0, 0, 0)
     prof_line_main.location = (-300, 50)
-    links.new(fillet_main.outputs[0], curve_to_mesh_main.inputs['Curve'])
+    links.new(normal_main.outputs['Curve'], curve_to_mesh_main.inputs['Curve'])
     links.new(prof_line_main.outputs[0], curve_to_mesh_main.inputs['Profile Curve'])
 
     # 幹線道路面を地面から確実に浮かせる (Z +0.22m)
@@ -290,7 +299,7 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
 
     mesh_lines_main = nodes.new('GeometryNodeCurveToMesh')
     mesh_lines_main.location = (-100, -100)
-    links.new(fillet_main.outputs[0], mesh_lines_main.inputs['Curve'])
+    links.new(normal_main.outputs['Curve'], mesh_lines_main.inputs['Curve'])
     links.new(join_profiles_main.outputs[0], mesh_lines_main.inputs['Profile Curve'])
 
     transform_lines = nodes.new('GeometryNodeTransform')
@@ -309,16 +318,23 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
     links.new(set_mat_line.outputs[0], join_main_all.inputs['Geometry'])
 
     # 3. 街路・小道（Inverted: radius <= 0.75）の処理
-    fillet_sub = nodes.new('GeometryNodeFilletCurve')
-    if hasattr(fillet_sub, 'mode'):
-        fillet_sub.mode = 'POLY'
-    elif 'Mode' in fillet_sub.inputs:
-        fillet_sub.inputs['Mode'].default_value = 'Poly'
-    fillet_sub.inputs['Count'].default_value = 16
-    fillet_sub.inputs['Limit Radius'].default_value = True
-    fillet_sub.inputs['Radius'].default_value = sub_width * 0.8
-    fillet_sub.location = (-350, -350)
-    links.new(sep_geom.outputs['Inverted'], fillet_sub.inputs['Curve'])
+    resample_sub = nodes.new('GeometryNodeResampleCurve')
+    if hasattr(resample_sub, 'mode'):
+        resample_sub.mode = 'LENGTH'
+    elif 'Mode' in resample_sub.inputs:
+        resample_sub.inputs['Mode'].default_value = 'Length'
+    if 'Length' in resample_sub.inputs:
+        resample_sub.inputs['Length'].default_value = 18.0
+    resample_sub.location = (-420, -350)
+    links.new(sep_geom.outputs['Inverted'], resample_sub.inputs['Curve'])
+
+    normal_sub = nodes.new('GeometryNodeSetCurveNormal')
+    if hasattr(normal_sub, 'mode'):
+        normal_sub.mode = 'Z_UP'
+    elif 'Mode' in normal_sub.inputs:
+        normal_sub.inputs['Mode'].default_value = 'Z Up'
+    normal_sub.location = (-260, -350)
+    links.new(resample_sub.outputs['Curve'], normal_sub.inputs['Curve'])
 
     curve_to_mesh_sub = nodes.new('GeometryNodeCurveToMesh')
     curve_to_mesh_sub.location = (-100, -350)
@@ -326,7 +342,7 @@ def setup_mixed_road_geometry_nodes(curve_obj, primary_type='ASPHALT', secondary
     prof_line_sub.inputs['Start'].default_value = (sub_width / 2.0, 0, 0)
     prof_line_sub.inputs['End'].default_value = (-sub_width / 2.0, 0, 0)
     prof_line_sub.location = (-300, -500)
-    links.new(fillet_sub.outputs[0], curve_to_mesh_sub.inputs['Curve'])
+    links.new(normal_sub.outputs['Curve'], curve_to_mesh_sub.inputs['Curve'])
     links.new(prof_line_sub.outputs[0], curve_to_mesh_sub.inputs['Profile Curve'])
 
     # 街路・小道面も地面から確実に浮かせる (Z +0.20m)

@@ -47,6 +47,46 @@ def detect_biome(prompt, user_choice='AUTO'):
     return biomes[0]
 
 
+def _add_micro_bump_to_bsdf(nodes, links, node_bsdf, pos_socket, strength=0.40, distance=1.5):
+    """高周波 Noise + Voronoi による岩肌・砂利・浸食溝バンプを Principled BSDF の Normal に接続する"""
+    tex_noise = nodes.new('ShaderNodeTexNoise')
+    tex_noise.location = (250, -320)
+    tex_noise.inputs['Scale'].default_value = 0.035
+    tex_noise.inputs['Detail'].default_value = 8.0
+    if 'Roughness' in tex_noise.inputs:
+        tex_noise.inputs['Roughness'].default_value = 0.65
+    links.new(pos_socket, tex_noise.inputs['Vector'])
+
+    tex_voronoi = nodes.new('ShaderNodeTexVoronoi')
+    tex_voronoi.location = (250, -520)
+    tex_voronoi.inputs['Scale'].default_value = 0.08
+    links.new(pos_socket, tex_voronoi.inputs['Vector'])
+
+    noise_fac = tex_noise.outputs['Fac'] if 'Fac' in tex_noise.outputs else tex_noise.outputs[0]
+    vor_dist = tex_voronoi.outputs['Distance'] if 'Distance' in tex_voronoi.outputs else tex_voronoi.outputs[0]
+
+    # Noise (65%) + Voronoi (35%) のブレンドで岩の割れ目と浸食溝を表現
+    mix_bump = nodes.new('ShaderNodeMath')
+    mix_bump.operation = 'MULTIPLY_ADD'
+    mix_bump.location = (450, -380)
+    links.new(noise_fac, mix_bump.inputs[0])
+    mix_bump.inputs[1].default_value = 0.65
+    # 0.35 * voronoi
+    mul_vor = nodes.new('ShaderNodeMath')
+    mul_vor.operation = 'MULTIPLY'
+    mul_vor.location = (380, -520)
+    links.new(vor_dist, mul_vor.inputs[0])
+    mul_vor.inputs[1].default_value = 0.35
+    links.new(mul_vor.outputs[0], mix_bump.inputs[2])
+
+    node_bump = nodes.new('ShaderNodeBump')
+    node_bump.location = (640, -380)
+    node_bump.inputs['Strength'].default_value = strength
+    node_bump.inputs['Distance'].default_value = distance
+    links.new(mix_bump.outputs[0], node_bump.inputs['Height'])
+    links.new(node_bump.outputs['Normal'], node_bsdf.inputs['Normal'])
+
+
 def get_or_create_multi_biome_material(sub_biomes=None):
     """標高・大域ノイズ・傾斜を統合したプロシージャル・マルチバイオームマテリアルを構築"""
     if sub_biomes and 'MULTI' not in sub_biomes:
@@ -56,10 +96,10 @@ def get_or_create_multi_biome_material(sub_biomes=None):
         mat_name = "Terrain_Biome_MULTI"
 
     mat = bpy.data.materials.get(mat_name)
-    if mat:
+    if mat and mat.use_nodes and any(n.type == 'BUMP' for n in mat.node_tree.nodes):
         return mat
-
-    mat = bpy.data.materials.new(name=mat_name)
+    if not mat:
+        mat = bpy.data.materials.new(name=mat_name)
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
@@ -340,6 +380,7 @@ def get_or_create_multi_biome_material(sub_biomes=None):
     res_out = get_output_socket(mix_final, 'Result', 'Color')
     links.new(res_out, node_bsdf.inputs['Base Color'])
     links.new(final_rough, node_bsdf.inputs['Roughness'])
+    _add_micro_bump_to_bsdf(nodes, links, node_bsdf, node_geom.outputs['Position'])
 
     print(f"マルチバイオームマテリアル '{mat_name}' を構築しました。")
     return mat
@@ -352,10 +393,10 @@ def get_or_create_terrain_material(biome='PLAINS', sub_biomes=None):
 
     mat_name = f"Terrain_Biome_{biome}"
     mat = bpy.data.materials.get(mat_name)
-    if mat:
+    if mat and mat.use_nodes and any(n.type == 'BUMP' for n in mat.node_tree.nodes):
         return mat
-
-    mat = bpy.data.materials.new(name=mat_name)
+    if not mat:
+        mat = bpy.data.materials.new(name=mat_name)
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
@@ -522,6 +563,7 @@ def get_or_create_terrain_material(biome='PLAINS', sub_biomes=None):
 
     res_out = get_output_socket(mix_final, 'Result', 'Color')
     links.new(res_out, node_bsdf.inputs['Base Color'])
+    _add_micro_bump_to_bsdf(nodes, links, node_bsdf, node_geom.outputs['Position'])
 
     return mat
 

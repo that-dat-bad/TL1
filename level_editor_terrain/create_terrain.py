@@ -94,7 +94,20 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
             # Height and Noise Settings
             group.interface.new_socket('Noise Scale', in_out='INPUT', socket_type='NodeSocketFloat').default_value = preset_noise
+            group.interface.new_socket('Noise Offset', in_out='INPUT', socket_type='NodeSocketVector').default_value = (0.0, 0.0, 0.0)
             group.interface.new_socket('Terrain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = preset_height
+            group.interface.new_socket('City Center', in_out='INPUT', socket_type='NodeSocketVector').default_value = (0.0, 0.0, 0.0)
+            group.interface.new_socket('City Grade Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 0.0
+            sock_ridge = group.interface.new_socket('Ridge Sharpness', in_out='INPUT', socket_type='NodeSocketFloat')
+            sock_ridge.default_value = 0.5
+            if hasattr(sock_ridge, 'min_value'):
+                sock_ridge.min_value = 0.0
+                sock_ridge.max_value = 1.0
+            sock_detail = group.interface.new_socket('Detail Strength', in_out='INPUT', socket_type='NodeSocketFloat')
+            sock_detail.default_value = 0.35
+            if hasattr(sock_detail, 'min_value'):
+                sock_detail.min_value = 0.0
+                sock_detail.max_value = 1.0
             # Mountain Parameters
             group.interface.new_socket('Mountain Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = mt_height
             group.interface.new_socket('Mountain Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = mt_radius
@@ -102,11 +115,12 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.interface.new_socket('Valley Depth', in_out='INPUT', socket_type='NodeSocketFloat').default_value = val_depth
             group.interface.new_socket('Valley Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = val_radius
             # Flat Parameters
-            group.interface.new_socket('Flat Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 25.0
-            group.interface.new_socket('Flat Blend', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 35.0
+            group.interface.new_socket('Flat Radius', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 65.0
+            group.interface.new_socket('Flat Blend', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 180.0
             # Hole Parameters
             group.interface.new_socket('Hole Location', in_out='INPUT', socket_type='NodeSocketVector').default_value = (0.0, 0.0, 0.0)
             group.interface.new_socket('Hole Size', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 0.0
+            group.interface.new_socket('Tunnel Cutters', in_out='INPUT', socket_type='NodeSocketCollection')
 
             # Outputs
             group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
@@ -121,15 +135,21 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
             group.inputs.new('NodeSocketFloat', 'Grid Size Y').default_value = target_size
 
             group.inputs.new('NodeSocketFloat', 'Noise Scale').default_value = preset_noise
+            group.inputs.new('NodeSocketVector', 'Noise Offset').default_value = (0.0, 0.0, 0.0)
             group.inputs.new('NodeSocketFloat', 'Terrain Height').default_value = preset_height
+            group.inputs.new('NodeSocketVector', 'City Center').default_value = (0.0, 0.0, 0.0)
+            group.inputs.new('NodeSocketFloat', 'City Grade Radius').default_value = 0.0
+            group.inputs.new('NodeSocketFloat', 'Ridge Sharpness').default_value = 0.5
+            group.inputs.new('NodeSocketFloat', 'Detail Strength').default_value = 0.35
             group.inputs.new('NodeSocketFloat', 'Mountain Height').default_value = mt_height
             group.inputs.new('NodeSocketFloat', 'Mountain Radius').default_value = mt_radius
             group.inputs.new('NodeSocketFloat', 'Valley Depth').default_value = val_depth
             group.inputs.new('NodeSocketFloat', 'Valley Radius').default_value = val_radius
-            group.inputs.new('NodeSocketFloat', 'Flat Radius').default_value = 25.0
-            group.inputs.new('NodeSocketFloat', 'Flat Blend').default_value = 35.0
+            group.inputs.new('NodeSocketFloat', 'Flat Radius').default_value = 65.0
+            group.inputs.new('NodeSocketFloat', 'Flat Blend').default_value = 180.0
             group.inputs.new('NodeSocketVector', 'Hole Location').default_value = (0.0, 0.0, 0.0)
             group.inputs.new('NodeSocketFloat', 'Hole Size').default_value = 0.0
+            group.inputs.new('NodeSocketCollection', 'Tunnel Cutters')
             
             group.outputs.new('NodeSocketGeometry', 'Geometry')
             group.outputs.new('NodeSocketFloat', 'Buildable Area')
@@ -217,15 +237,15 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         math_step_y.inputs[1].default_value = 20.0
         links.new(node_in.outputs['Grid Size Y'], math_step_y.inputs[0])
 
-        # ビューポート時の分割数計算 (さらに / 4: 20kmなら250分割)
+        # ビューポート時の分割数計算 (40km時 2000/1.8 ≈ 1111分割、20km時 1000/1.8 ≈ 555分割)
         math_div_x = nodes.new('ShaderNodeMath')
         math_div_x.operation = 'DIVIDE'
-        math_div_x.inputs[1].default_value = 4.0
+        math_div_x.inputs[1].default_value = 1.8
         links.new(math_step_x.outputs[0], math_div_x.inputs[0])
 
         math_div_y = nodes.new('ShaderNodeMath')
         math_div_y.operation = 'DIVIDE'
-        math_div_y.inputs[1].default_value = 4.0
+        math_div_y.inputs[1].default_value = 1.8
         links.new(math_step_y.outputs[0], math_div_y.inputs[0])
 
         # スイッチノード (Viewport なら /4、Render なら そのまま)
@@ -293,20 +313,132 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         
         links.new(math_clamp_y.outputs[0], node_grid.inputs['Vertices Y'])
 
-        # 1. Position ノード
+        # 1. Position ノード + Noise Offset (シードごとに異なる地形パターンを生成)
         node_pos = nodes.new('GeometryNodeInputPosition')
-        node_pos.location = (-1300, -200)
+        node_pos.location = (-1450, -200)
 
-        # 2. Noise Texture ノード
+        node_noise_pos = nodes.new('ShaderNodeVectorMath')
+        node_noise_pos.operation = 'ADD'
+        node_noise_pos.location = (-1300, -200)
+        links.new(node_pos.outputs['Position'], node_noise_pos.inputs[0])
+        links.new(node_in.outputs['Noise Offset'], node_noise_pos.inputs[1])
+
+        # 2-A. 大域ノイズ (Macro): Scale = Noise Scale * 0.5, Detail = 4.0
+        node_macro_scale = nodes.new('ShaderNodeMath')
+        node_macro_scale.operation = 'MULTIPLY'
+        node_macro_scale.inputs[1].default_value = 0.5
+        node_macro_scale.location = (-1250, -180)
+        links.new(node_in.outputs['Noise Scale'], node_macro_scale.inputs[0])
+
         try:
             node_noise = nodes.new('FunctionNodeNoiseTexture')
         except RuntimeError:
             node_noise = nodes.new('ShaderNodeTexNoise')
         node_noise.location = (-1100, -200)
-        links.new(node_pos.outputs['Position'], node_noise.inputs['Vector'])
-        links.new(node_in.outputs['Noise Scale'], node_noise.inputs['Scale'])
+        if 'Detail' in node_noise.inputs:
+            node_noise.inputs['Detail'].default_value = 4.0
+        if 'Roughness' in node_noise.inputs:
+            node_noise.inputs['Roughness'].default_value = 0.5
+        links.new(node_noise_pos.outputs['Vector'], node_noise.inputs['Vector'])
+        links.new(node_macro_scale.outputs[0], node_noise.inputs['Scale'])
 
-        # 3. Math: Subtract 0.5 (ノイズ高さを中央基準にする)
+        # 2-B. 尾根ノイズ (Ridged Mountain): Scale = Noise Scale * 1.8, Detail = 8.0, Roughness = 0.6
+        node_ridge_scale = nodes.new('ShaderNodeMath')
+        node_ridge_scale.operation = 'MULTIPLY'
+        node_ridge_scale.inputs[1].default_value = 1.8
+        node_ridge_scale.location = (-1250, -320)
+        links.new(node_in.outputs['Noise Scale'], node_ridge_scale.inputs[0])
+
+        try:
+            node_detail_noise = nodes.new('FunctionNodeNoiseTexture')
+        except RuntimeError:
+            node_detail_noise = nodes.new('ShaderNodeTexNoise')
+        node_detail_noise.location = (-1100, -350)
+        if 'Detail' in node_detail_noise.inputs:
+            node_detail_noise.inputs['Detail'].default_value = 8.0
+        if 'Roughness' in node_detail_noise.inputs:
+            node_detail_noise.inputs['Roughness'].default_value = 0.6
+        links.new(node_noise_pos.outputs['Vector'], node_detail_noise.inputs['Vector'])
+        links.new(node_ridge_scale.outputs[0], node_detail_noise.inputs['Scale'])
+
+        # Ridged Noise: power(1.0 - abs(2*n - 1), 1.7) -> 鋭い山稜と浸食谷 (0.0 ~ 1.0)
+        detail_out = node_detail_noise.outputs['Factor'] if 'Factor' in node_detail_noise.outputs else node_detail_noise.outputs[0]
+        node_det_mul2 = nodes.new('ShaderNodeMath')
+        node_det_mul2.operation = 'MULTIPLY'
+        node_det_mul2.inputs[1].default_value = 2.0
+        node_det_mul2.location = (-950, -350)
+        links.new(detail_out, node_det_mul2.inputs[0])
+
+        node_det_sub = nodes.new('ShaderNodeMath')
+        node_det_sub.operation = 'SUBTRACT'
+        node_det_sub.inputs[1].default_value = 1.0
+        node_det_sub.location = (-840, -350)
+        links.new(node_det_mul2.outputs[0], node_det_sub.inputs[0])
+
+        node_det_abs = nodes.new('ShaderNodeMath')
+        node_det_abs.operation = 'ABSOLUTE'
+        node_det_abs.location = (-730, -350)
+        links.new(node_det_sub.outputs[0], node_det_abs.inputs[0])
+
+        node_ridged_raw = nodes.new('ShaderNodeMath')
+        node_ridged_raw.operation = 'SUBTRACT'
+        node_ridged_raw.inputs[0].default_value = 1.0
+        node_ridged_raw.location = (-620, -350)
+        links.new(node_det_abs.outputs[0], node_ridged_raw.inputs[1])
+
+        node_ridged = nodes.new('ShaderNodeMath')
+        node_ridged.operation = 'POWER'
+        node_ridged.use_clamp = True
+        node_ridged.inputs[1].default_value = 1.7
+        node_ridged.location = (-510, -350)
+        links.new(node_ridged_raw.outputs[0], node_ridged.inputs[0])
+
+        # 2-C. 微細ディテールノイズ (Micro Rock/Erosion): Scale = Noise Scale * 8.0, Detail = 10.0, Roughness = 0.65
+        node_micro_scale = nodes.new('ShaderNodeMath')
+        node_micro_scale.operation = 'MULTIPLY'
+        node_micro_scale.inputs[1].default_value = 8.0
+        node_micro_scale.location = (-1250, -480)
+        links.new(node_in.outputs['Noise Scale'], node_micro_scale.inputs[0])
+
+        try:
+            node_micro_noise = nodes.new('FunctionNodeNoiseTexture')
+        except RuntimeError:
+            node_micro_noise = nodes.new('ShaderNodeTexNoise')
+        node_micro_noise.location = (-1100, -480)
+        if 'Detail' in node_micro_noise.inputs:
+            node_micro_noise.inputs['Detail'].default_value = 10.0
+        if 'Roughness' in node_micro_noise.inputs:
+            node_micro_noise.inputs['Roughness'].default_value = 0.65
+        links.new(node_noise_pos.outputs['Vector'], node_micro_noise.inputs['Vector'])
+        links.new(node_micro_scale.outputs[0], node_micro_noise.inputs['Scale'])
+
+        micro_out = node_micro_noise.outputs['Factor'] if 'Factor' in node_micro_noise.outputs else node_micro_noise.outputs[0]
+        node_micro_sub = nodes.new('ShaderNodeMath')
+        node_micro_sub.operation = 'SUBTRACT'
+        node_micro_sub.inputs[1].default_value = 0.5
+        node_micro_sub.location = (-900, -480)
+        links.new(micro_out, node_micro_sub.inputs[0])
+
+        # Micro * (0.12 + Detail Strength * 0.22)
+        node_micro_str_mul = nodes.new('ShaderNodeMath')
+        node_micro_str_mul.operation = 'MULTIPLY'
+        node_micro_str_mul.inputs[1].default_value = 0.22
+        node_micro_str_mul.location = (-900, -560)
+        links.new(node_in.outputs['Detail Strength'], node_micro_str_mul.inputs[0])
+
+        node_micro_str = nodes.new('ShaderNodeMath')
+        node_micro_str.operation = 'ADD'
+        node_micro_str.inputs[1].default_value = 0.12
+        node_micro_str.location = (-780, -560)
+        links.new(node_micro_str_mul.outputs[0], node_micro_str.inputs[0])
+
+        node_micro_amp = nodes.new('ShaderNodeMath')
+        node_micro_amp.operation = 'MULTIPLY'
+        node_micro_amp.location = (-660, -480)
+        links.new(node_micro_sub.outputs[0], node_micro_amp.inputs[0])
+        links.new(node_micro_str.outputs[0], node_micro_amp.inputs[1])
+
+        # 3. 3層合成: Macro(0.85) + Ridged(0.4 + Ridge Sharpness * 0.75) + Micro
         node_sub = nodes.new('ShaderNodeMath')
         node_sub.operation = 'SUBTRACT'
         node_sub.inputs[1].default_value = 0.5
@@ -314,12 +446,124 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         noise_out = node_noise.outputs['Factor'] if 'Factor' in node_noise.outputs else node_noise.outputs[0]
         links.new(noise_out, node_sub.inputs[0])
 
+        node_macro_amp = nodes.new('ShaderNodeMath')
+        node_macro_amp.operation = 'MULTIPLY'
+        node_macro_amp.inputs[1].default_value = 0.85
+        node_macro_amp.location = (-780, -200)
+        links.new(node_sub.outputs[0], node_macro_amp.inputs[0])
+
+        # (ridged - 0.30) * (0.35 + Ridge Sharpness * 0.65)
+        node_rid_center = nodes.new('ShaderNodeMath')
+        node_rid_center.operation = 'SUBTRACT'
+        node_rid_center.inputs[1].default_value = 0.30
+        node_rid_center.location = (-400, -350)
+        links.new(node_ridged.outputs[0], node_rid_center.inputs[0])
+
+        node_rid_w_mul = nodes.new('ShaderNodeMath')
+        node_rid_w_mul.operation = 'MULTIPLY'
+        node_rid_w_mul.inputs[1].default_value = 0.65
+        node_rid_w_mul.location = (-400, -430)
+        links.new(node_in.outputs['Ridge Sharpness'], node_rid_w_mul.inputs[0])
+
+        node_rid_w = nodes.new('ShaderNodeMath')
+        node_rid_w.operation = 'ADD'
+        node_rid_w.inputs[1].default_value = 0.35
+        node_rid_w.location = (-290, -430)
+        links.new(node_rid_w_mul.outputs[0], node_rid_w.inputs[0])
+
+        node_rid_amp = nodes.new('ShaderNodeMath')
+        node_rid_amp.operation = 'MULTIPLY'
+        node_rid_amp.location = (-240, -350)
+        links.new(node_rid_center.outputs[0], node_rid_amp.inputs[0])
+        links.new(node_rid_w.outputs[0], node_rid_amp.inputs[1])
+
+        node_mac_rid = nodes.new('ShaderNodeMath')
+        node_mac_rid.operation = 'ADD'
+        node_mac_rid.location = (-660, -200)
+        links.new(node_macro_amp.outputs[0], node_mac_rid.inputs[0])
+        links.new(node_rid_amp.outputs[0], node_mac_rid.inputs[1])
+
+        node_base_combined = nodes.new('ShaderNodeMath')
+        node_base_combined.operation = 'ADD'
+        node_base_combined.location = (-540, -200)
+        links.new(node_mac_rid.outputs[0], node_base_combined.inputs[0])
+        links.new(node_micro_amp.outputs[0], node_base_combined.inputs[1])
+
         # 4. Math: Multiply by Terrain Height
         node_mult = nodes.new('ShaderNodeMath')
         node_mult.operation = 'MULTIPLY'
-        node_mult.location = (-700, -200)
-        links.new(node_sub.outputs[0], node_mult.inputs[0])
+        node_mult.location = (-420, -200)
+        links.new(node_base_combined.outputs[0], node_mult.inputs[0])
         links.new(node_in.outputs['Terrain Height'], node_mult.inputs[1])
+
+        # 4.5 都市エリア地盤整地（グレーディング）マスク
+        # City Grade Radius > 0 の場合、街の中心周囲のベース起伏を緩やかに抑制する
+        node_sep_pos_xy = nodes.new('ShaderNodeSeparateXYZ')
+        node_sep_pos_xy.location = (-420, -640)
+        links.new(node_pos.outputs['Position'], node_sep_pos_xy.inputs['Vector'])
+
+        node_sep_city_xy = nodes.new('ShaderNodeSeparateXYZ')
+        node_sep_city_xy.location = (-420, -760)
+        links.new(node_in.outputs['City Center'], node_sep_city_xy.inputs['Vector'])
+
+        node_comb_pos2d = nodes.new('ShaderNodeCombineXYZ')
+        node_comb_pos2d.location = (-280, -640)
+        links.new(node_sep_pos_xy.outputs['X'], node_comb_pos2d.inputs['X'])
+        links.new(node_sep_pos_xy.outputs['Y'], node_comb_pos2d.inputs['Y'])
+
+        node_comb_city2d = nodes.new('ShaderNodeCombineXYZ')
+        node_comb_city2d.location = (-280, -760)
+        links.new(node_sep_city_xy.outputs['X'], node_comb_city2d.inputs['X'])
+        links.new(node_sep_city_xy.outputs['Y'], node_comb_city2d.inputs['Y'])
+
+        node_city_dist = nodes.new('ShaderNodeVectorMath')
+        node_city_dist.operation = 'DISTANCE'
+        node_city_dist.location = (-140, -700)
+        links.new(node_comb_pos2d.outputs['Vector'], node_city_dist.inputs[0])
+        links.new(node_comb_city2d.outputs['Vector'], node_city_dist.inputs[1])
+
+        node_city_r_min = nodes.new('ShaderNodeMath')
+        node_city_r_min.operation = 'MULTIPLY'
+        node_city_r_min.inputs[1].default_value = 0.55
+        node_city_r_min.location = (-140, -820)
+        links.new(node_in.outputs['City Grade Radius'], node_city_r_min.inputs[0])
+
+        node_city_r_max = nodes.new('ShaderNodeMath')
+        node_city_r_max.operation = 'MULTIPLY'
+        node_city_r_max.inputs[1].default_value = 1.45
+        node_city_r_max.location = (-140, -900)
+        links.new(node_in.outputs['City Grade Radius'], node_city_r_max.inputs[0])
+
+        node_city_map = nodes.new('ShaderNodeMapRange')
+        node_city_map.interpolation_type = 'SMOOTHSTEP'
+        node_city_map.inputs['To Min'].default_value = 0.15
+        node_city_map.inputs['To Max'].default_value = 1.0
+        node_city_map.location = (20, -750)
+        links.new(node_city_dist.outputs['Value'], node_city_map.inputs['Value'])
+        links.new(node_city_r_min.outputs[0], node_city_map.inputs['From Min'])
+        links.new(node_city_r_max.outputs[0], node_city_map.inputs['From Max'])
+
+        node_city_active = nodes.new('ShaderNodeMath')
+        node_city_active.operation = 'GREATER_THAN'
+        node_city_active.inputs[1].default_value = 1.0
+        node_city_active.location = (20, -920)
+        links.new(node_in.outputs['City Grade Radius'], node_city_active.inputs[0])
+
+        node_city_switch = nodes.new('GeometryNodeSwitch')
+        try:
+            node_city_switch.input_type = 'FLOAT'
+        except AttributeError:
+            pass
+        node_city_switch.location = (180, -780)
+        links.new(node_city_active.outputs[0], node_city_switch.inputs['Switch'])
+        node_city_switch.inputs['False'].default_value = 1.0
+        links.new(node_city_map.outputs['Result'], node_city_switch.inputs['True'])
+
+        node_base_graded = nodes.new('ShaderNodeMath')
+        node_base_graded.operation = 'MULTIPLY'
+        node_base_graded.location = (-280, -200)
+        links.new(node_mult.outputs[0], node_base_graded.inputs[0])
+        links.new(node_city_switch.outputs['Output'] if 'Output' in node_city_switch.outputs else node_city_switch.outputs[0], node_base_graded.inputs[1])
 
 
         # ==========================================
@@ -336,87 +580,57 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_mt_realize.location = (-1150, 600)
         links.new(node_mt_info.outputs['Instances'], node_mt_realize.inputs['Geometry'])
 
-        # Store Named Attribute (custom_radius)
-        node_mt_store_rad = nodes.new('GeometryNodeStoreNamedAttribute')
-        node_mt_store_rad.inputs['Name'].default_value = 'custom_radius'
-        node_mt_store_rad.location = (-1150, 750)
-        node_mt_in_rad = nodes.new('GeometryNodeInputRadius')
-        node_mt_in_rad.location = (-1300, 750)
-        links.new(node_mt_realize.outputs['Geometry'], node_mt_store_rad.inputs['Geometry'])
-        links.new(node_mt_in_rad.outputs[0], node_mt_store_rad.inputs['Value'])
-
-        # Store Named Attribute (custom_tilt)
-        node_mt_store_tilt = nodes.new('GeometryNodeStoreNamedAttribute')
-        node_mt_store_tilt.inputs['Name'].default_value = 'custom_tilt'
-        node_mt_store_tilt.location = (-1000, 750)
-        node_mt_in_tilt = nodes.new('GeometryNodeInputCurveTilt')
-        node_mt_in_tilt.location = (-1150, 700)
-        links.new(node_mt_store_rad.outputs['Geometry'], node_mt_store_tilt.inputs['Geometry'])
-        links.new(node_mt_in_tilt.outputs[0], node_mt_store_tilt.inputs['Value'])
-
-        # Curve to Points でポイントクラウド化し、サンプリングを確実に動作させる
-        node_mt_c2p = nodes.new('GeometryNodeCurveToPoints')
-        node_mt_c2p.mode = 'LENGTH'
-        node_mt_c2p.inputs['Length'].default_value = 5.0
-        node_mt_c2p.location = (-850, 800)
-        links.new(node_mt_store_tilt.outputs['Geometry'], node_mt_c2p.inputs['Curve'])
-
-        # 最近接ポイントのインデックスを取得
-        node_mt_sample_near = nodes.new('GeometryNodeSampleNearest')
-        node_mt_sample_near.location = (-700, 900)
-        links.new(node_mt_c2p.outputs['Points'], node_mt_sample_near.inputs['Geometry'])
-
-        # custom_radius 名前付きアトリビュートノードの作成
-        node_mt_attr_radius = nodes.new('GeometryNodeInputNamedAttribute')
-        node_mt_attr_radius.inputs['Name'].default_value = 'custom_radius'
-        node_mt_attr_radius.location = (-700, 800)
-
-        # 半径アトリビュートの取得とサンプリング (幅の調整用)
-        node_mt_sample_radius = nodes.new('GeometryNodeSampleIndex')
-        node_mt_sample_radius.data_type = 'FLOAT'
-        node_mt_sample_radius.location = (-550, 800)
-        links.new(node_mt_c2p.outputs['Points'], node_mt_sample_radius.inputs['Geometry'])
-        links.new(node_mt_attr_radius.outputs['Attribute'], node_mt_sample_radius.inputs['Value'])
-        links.new(node_mt_sample_near.outputs['Index'], node_mt_sample_radius.inputs['Index'])
-
-        # custom_tilt 名前付きアトリビュートノードの作成
-        node_mt_attr_tilt = nodes.new('GeometryNodeInputNamedAttribute')
-        node_mt_attr_tilt.inputs['Name'].default_value = 'custom_tilt'
-        node_mt_attr_tilt.location = (-700, 700)
-
-        # 傾きアトリビュートの取得とサンプリング (高さの調整用)
-        node_mt_sample_tilt = nodes.new('GeometryNodeSampleIndex')
-        node_mt_sample_tilt.data_type = 'FLOAT'
-        node_mt_sample_tilt.location = (-550, 700)
-        links.new(node_mt_c2p.outputs['Points'], node_mt_sample_tilt.inputs['Geometry'])
-        links.new(node_mt_attr_tilt.outputs['Attribute'], node_mt_sample_tilt.inputs['Value'])
-        links.new(node_mt_sample_near.outputs['Index'], node_mt_sample_tilt.inputs['Index'])
-
         # 1.5. Curve to Mesh バイパス
+        # (Sample Nearest / Sample Index による custom_radius・custom_tilt の不連続ボロノイサンプリングを廃止し、
+        #  純粋なエッジ連続距離 GeometryNodeProximity + SMOOTHSTEP のみで構成して垂直断層を物理的にゼロにする)
         mt_geometry_processed = add_curve_to_mesh_bypass(node_mt_realize.outputs['Geometry'], -1000, 650)
 
-        # 2. Geometry Proximity (山への近接距離)
+        # 2. Geometry Proximity (山スプラインエッジへの連続距離: 空間内で常に C0 連続)
         node_mt_prox = nodes.new('GeometryNodeProximity')
         node_mt_prox.target_element = 'EDGES'
         node_mt_prox.location = (-600, 600)
         links.new(mt_geometry_processed, node_mt_prox.inputs['Target'])
 
-        # 個別半径（radius）を適用するための乗算ノード
-        node_mt_radius_mult = nodes.new('ShaderNodeMath')
-        node_mt_radius_mult.operation = 'MULTIPLY'
-        node_mt_radius_mult.location = (-500, 750)
-        links.new(node_in.outputs['Mountain Radius'], node_mt_radius_mult.inputs[0])
-        links.new(node_mt_sample_radius.outputs['Value'], node_mt_radius_mult.inputs[1])
+        # 2.5. 距離フィールドへのノイズ変調 (Domain Warping: 階段状ジャギーの解消)
+        try:
+            node_warp_noise = nodes.new('FunctionNodeNoiseTexture')
+        except RuntimeError:
+            node_warp_noise = nodes.new('ShaderNodeTexNoise')
+        if hasattr(node_warp_noise, 'noise_dimensions'):
+            node_warp_noise.noise_dimensions = '3D'
+        if 'Scale' in node_warp_noise.inputs:
+            node_warp_noise.inputs['Scale'].default_value = 0.0012
+        if 'Detail' in node_warp_noise.inputs:
+            node_warp_noise.inputs['Detail'].default_value = 4.0
+        node_warp_noise.location = (-780, 520)
+        links.new(node_noise_pos.outputs['Vector'], node_warp_noise.inputs['Vector'])
 
-        # 3. Map Range (距離をウェイト 0.0 ~ 1.0 にマッピング)
+        warp_noise_out = (
+            node_warp_noise.outputs['Fac']
+            if 'Fac' in node_warp_noise.outputs
+            else (node_warp_noise.outputs['Factor'] if 'Factor' in node_warp_noise.outputs else node_warp_noise.outputs[0])
+        )
+        node_warp_mul = nodes.new('ShaderNodeMath')
+        node_warp_mul.operation = 'MULTIPLY'
+        node_warp_mul.inputs[1].default_value = 220.0
+        node_warp_mul.location = (-620, 520)
+        links.new(warp_noise_out, node_warp_mul.inputs[0])
+
+        node_mt_dist_warp = nodes.new('ShaderNodeMath')
+        node_mt_dist_warp.operation = 'ADD'
+        node_mt_dist_warp.location = (-500, 600)
+        links.new(node_mt_prox.outputs['Distance'], node_mt_dist_warp.inputs[0])
+        links.new(node_warp_mul.outputs[0], node_mt_dist_warp.inputs[1])
+
+        # 3. Map Range (純粋な連続距離を SMOOTHSTEP でウェイト 0.0 ~ 1.0 にマッピング)
         node_mt_map = nodes.new('ShaderNodeMapRange')
         node_mt_map.interpolation_type = 'SMOOTHSTEP'
         node_mt_map.inputs['From Min'].default_value = 0.0
         node_mt_map.inputs['To Min'].default_value = 1.0
         node_mt_map.inputs['To Max'].default_value = 0.0
         node_mt_map.location = (-400, 600)
-        links.new(node_mt_prox.outputs['Distance'], node_mt_map.inputs['Value'])
-        links.new(node_mt_radius_mult.outputs[0], node_mt_map.inputs['From Max'])
+        links.new(node_mt_dist_warp.outputs[0], node_mt_map.inputs['Value'])
+        links.new(node_in.outputs['Mountain Radius'], node_mt_map.inputs['From Max'])
 
         # 4. 山のオブジェクト存在判定 (バイパス処理)
         try:
@@ -449,24 +663,95 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_mt_sum.outputs[0], node_mt_exist.inputs[0])
         node_mt_exist.inputs[1].default_value = 0.0
 
-        # 山の合計隆起高さの算出
-        # 個別高さ（1.0 + tilt）を計算するノード
-        node_mt_height_factor = nodes.new('ShaderNodeMath')
-        node_mt_height_factor.operation = 'ADD'
-        node_mt_height_factor.inputs[1].default_value = 1.0
-        node_mt_height_factor.location = (-350, 450)
-        links.new(node_mt_sample_tilt.outputs['Value'], node_mt_height_factor.inputs[0])
+        # 山の合計隆起高さの算出 (clamp 等のステップ関数を使わず SMOOTHSTEP と連続乗算のみで構成)
+        node_mt_exp_mul = nodes.new('ShaderNodeMath')
+        node_mt_exp_mul.operation = 'MULTIPLY'
+        node_mt_exp_mul.inputs[1].default_value = 0.75
+        node_mt_exp_mul.location = (-380, 560)
+        links.new(node_in.outputs['Ridge Sharpness'], node_mt_exp_mul.inputs[0])
+
+        node_mt_exp = nodes.new('ShaderNodeMath')
+        node_mt_exp.operation = 'ADD'
+        node_mt_exp.inputs[1].default_value = 1.0
+        node_mt_exp.location = (-280, 560)
+        links.new(node_mt_exp_mul.outputs[0], node_mt_exp.inputs[0])
+
+        node_mt_pow = nodes.new('ShaderNodeMath')
+        node_mt_pow.operation = 'POWER'
+        node_mt_pow.use_clamp = False
+        node_mt_pow.location = (-180, 560)
+        links.new(node_mt_map.outputs['Result'], node_mt_pow.inputs[0])
+        links.new(node_mt_exp.outputs[0], node_mt_pow.inputs[1])
+
+        # 山の尾根・浸食ガリーディテール: 1.0 + (ridged - 0.35) * Ridge Sharpness * 1.10
+        node_mt_rid_sub = nodes.new('ShaderNodeMath')
+        node_mt_rid_sub.operation = 'SUBTRACT'
+        node_mt_rid_sub.inputs[1].default_value = 0.35
+        node_mt_rid_sub.location = (-380, 680)
+        links.new(node_ridged.outputs[0], node_mt_rid_sub.inputs[0])
+
+        node_mt_rid_mul1 = nodes.new('ShaderNodeMath')
+        node_mt_rid_mul1.operation = 'MULTIPLY'
+        node_mt_rid_mul1.location = (-280, 680)
+        links.new(node_mt_rid_sub.outputs[0], node_mt_rid_mul1.inputs[0])
+        links.new(node_in.outputs['Ridge Sharpness'], node_mt_rid_mul1.inputs[1])
+
+        node_mt_rid_mul2 = nodes.new('ShaderNodeMath')
+        node_mt_rid_mul2.operation = 'MULTIPLY'
+        node_mt_rid_mul2.inputs[1].default_value = 1.10
+        node_mt_rid_mul2.location = (-180, 680)
+        links.new(node_mt_rid_mul1.outputs[0], node_mt_rid_mul2.inputs[0])
+
+        node_mt_rid_fac = nodes.new('ShaderNodeMath')
+        node_mt_rid_fac.operation = 'ADD'
+        node_mt_rid_fac.inputs[1].default_value = 1.0
+        node_mt_rid_fac.location = (-80, 680)
+        links.new(node_mt_rid_mul2.outputs[0], node_mt_rid_fac.inputs[0])
+
+        node_mt_shaped = nodes.new('ShaderNodeMath')
+        node_mt_shaped.operation = 'MULTIPLY'
+        node_mt_shaped.location = (-80, 560)
+        links.new(node_mt_pow.outputs[0], node_mt_shaped.inputs[0])
+        links.new(node_mt_rid_fac.outputs[0], node_mt_shaped.inputs[1])
+
+        # 山ごとの高さバリエーションは 3D 空間の連続ノイズ変調 (SMOOTHSTEP: 0.70 ~ 1.30) で表現
+        try:
+            node_mt_var_noise = nodes.new('FunctionNodeNoiseTexture')
+        except RuntimeError:
+            node_mt_var_noise = nodes.new('ShaderNodeTexNoise')
+        if hasattr(node_mt_var_noise, 'noise_dimensions'):
+            node_mt_var_noise.noise_dimensions = '3D'
+        if 'Scale' in node_mt_var_noise.inputs:
+            node_mt_var_noise.inputs['Scale'].default_value = 0.00018
+        if 'Detail' in node_mt_var_noise.inputs:
+            node_mt_var_noise.inputs['Detail'].default_value = 2.0
+        node_mt_var_noise.location = (-520, 440)
+        links.new(node_noise_pos.outputs['Vector'], node_mt_var_noise.inputs['Vector'])
+
+        mt_var_out = (
+            node_mt_var_noise.outputs['Fac']
+            if 'Fac' in node_mt_var_noise.outputs
+            else (node_mt_var_noise.outputs['Factor'] if 'Factor' in node_mt_var_noise.outputs else node_mt_var_noise.outputs[0])
+        )
+        node_mt_var_map = nodes.new('ShaderNodeMapRange')
+        node_mt_var_map.interpolation_type = 'SMOOTHSTEP'
+        node_mt_var_map.inputs['From Min'].default_value = 0.0
+        node_mt_var_map.inputs['From Max'].default_value = 1.0
+        node_mt_var_map.inputs['To Min'].default_value = 0.70
+        node_mt_var_map.inputs['To Max'].default_value = 1.30
+        node_mt_var_map.location = (-360, 440)
+        links.new(mt_var_out, node_mt_var_map.inputs['Value'])
 
         node_mt_height_mult = nodes.new('ShaderNodeMath')
         node_mt_height_mult.operation = 'MULTIPLY'
         node_mt_height_mult.location = (-200, 450)
         links.new(node_in.outputs['Mountain Height'], node_mt_height_mult.inputs[0])
-        links.new(node_mt_height_factor.outputs[0], node_mt_height_mult.inputs[1])
+        links.new(node_mt_var_map.outputs['Result'], node_mt_height_mult.inputs[1])
 
         node_mt_mult1 = nodes.new('ShaderNodeMath')
         node_mt_mult1.operation = 'MULTIPLY'
         node_mt_mult1.location = (-200, 600)
-        links.new(node_mt_map.outputs['Result'], node_mt_mult1.inputs[0])
+        links.new(node_mt_shaped.outputs[0], node_mt_mult1.inputs[0])
         links.new(node_mt_height_mult.outputs[0], node_mt_mult1.inputs[1])
 
         node_mt_height_final = nodes.new('ShaderNodeMath')
@@ -493,89 +778,31 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_vl_realize.location = (-1150, -400)
         links.new(node_vl_info.outputs['Instances'], node_vl_realize.inputs['Geometry'])
 
-        # Capture Attribute の作成 (Radius用)
-        node_vl_cap_rad = nodes.new('GeometryNodeCaptureAttribute')
-        # Store Named Attribute (custom_radius)
-        node_vl_store_rad = nodes.new('GeometryNodeStoreNamedAttribute')
-        node_vl_store_rad.inputs['Name'].default_value = 'custom_radius'
-        node_vl_store_rad.location = (-1150, -150)
-        node_vl_in_rad = nodes.new('GeometryNodeInputRadius')
-        node_vl_in_rad.location = (-1300, -150)
-        links.new(node_vl_realize.outputs['Geometry'], node_vl_store_rad.inputs['Geometry'])
-        links.new(node_vl_in_rad.outputs[0], node_vl_store_rad.inputs['Value'])
-
-        # Store Named Attribute (custom_tilt)
-        node_vl_store_tilt = nodes.new('GeometryNodeStoreNamedAttribute')
-        node_vl_store_tilt.inputs['Name'].default_value = 'custom_tilt'
-        node_vl_store_tilt.location = (-1000, -150)
-        node_vl_in_tilt = nodes.new('GeometryNodeInputCurveTilt')
-        node_vl_in_tilt.location = (-1150, -200)
-        links.new(node_vl_store_rad.outputs['Geometry'], node_vl_store_tilt.inputs['Geometry'])
-        links.new(node_vl_in_tilt.outputs[0], node_vl_store_tilt.inputs['Value'])
-
-        # Curve to Points でポイントクラウド化し、サンプリングを確実に動作させる
-        node_vl_c2p = nodes.new('GeometryNodeCurveToPoints')
-        node_vl_c2p.mode = 'LENGTH'
-        node_vl_c2p.inputs['Length'].default_value = 5.0
-        node_vl_c2p.location = (-850, -100)
-        links.new(node_vl_store_tilt.outputs['Geometry'], node_vl_c2p.inputs['Curve'])
-
-        # 最近接ポイントのインデックスを取得 (谷用)
-        node_vl_sample_near = nodes.new('GeometryNodeSampleNearest')
-        node_vl_sample_near.location = (-700, 0)
-        links.new(node_vl_c2p.outputs['Points'], node_vl_sample_near.inputs['Geometry'])
-
-        # custom_radius 名前付きアトリビュートノードの作成
-        node_vl_attr_radius = nodes.new('GeometryNodeInputNamedAttribute')
-        node_vl_attr_radius.inputs['Name'].default_value = 'custom_radius'
-        node_vl_attr_radius.location = (-700, -100)
-
-        # 半径アトリビュートの取得とサンプリング (幅の調整用)
-        node_vl_sample_radius = nodes.new('GeometryNodeSampleIndex')
-        node_vl_sample_radius.data_type = 'FLOAT'
-        node_vl_sample_radius.location = (-550, -100)
-        links.new(node_vl_c2p.outputs['Points'], node_vl_sample_radius.inputs['Geometry'])
-        links.new(node_vl_attr_radius.outputs['Attribute'], node_vl_sample_radius.inputs['Value'])
-        links.new(node_vl_sample_near.outputs['Index'], node_vl_sample_radius.inputs['Index'])
-
-        # custom_tilt 名前付きアトリビュートノードの作成
-        node_vl_attr_tilt = nodes.new('GeometryNodeInputNamedAttribute')
-        node_vl_attr_tilt.inputs['Name'].default_value = 'custom_tilt'
-        node_vl_attr_tilt.location = (-700, -200)
-
-        # 傾きアトリビュートの取得とサンプリング (深さの調整用)
-        node_vl_sample_tilt = nodes.new('GeometryNodeSampleIndex')
-        node_vl_sample_tilt.data_type = 'FLOAT'
-        node_vl_sample_tilt.location = (-550, -200)
-        links.new(node_vl_c2p.outputs['Points'], node_vl_sample_tilt.inputs['Geometry'])
-        links.new(node_vl_attr_tilt.outputs['Attribute'], node_vl_sample_tilt.inputs['Value'])
-        links.new(node_vl_sample_near.outputs['Index'], node_vl_sample_tilt.inputs['Index'])
-
-        # 1.5. Curve to Mesh バイパス
+        # 1.5. Curve to Mesh バイパス (Sample Nearest による不連続サンプリングを廃止)
         vl_geometry_processed = add_curve_to_mesh_bypass(node_vl_realize.outputs['Geometry'], -1000, -350)
 
-        # 2. Geometry Proximity (谷への近接距離)
+        # 2. Geometry Proximity (谷スプラインエッジへの連続距離)
         node_vl_prox = nodes.new('GeometryNodeProximity')
         node_vl_prox.target_element = 'EDGES'
         node_vl_prox.location = (-600, -400)
         links.new(vl_geometry_processed, node_vl_prox.inputs['Target'])
 
-        # 個別半径（radius）を適用するための乗算ノード
-        node_vl_radius_mult = nodes.new('ShaderNodeMath')
-        node_vl_radius_mult.operation = 'MULTIPLY'
-        node_vl_radius_mult.location = (-500, -250)
-        links.new(node_in.outputs['Valley Radius'], node_vl_radius_mult.inputs[0])
-        links.new(node_vl_sample_radius.outputs['Value'], node_vl_radius_mult.inputs[1])
+        # 2.5. 谷の距離フィールドへのノイズ変調 (Domain Warping: 階段状ジャギーの解消)
+        node_vl_dist_warp = nodes.new('ShaderNodeMath')
+        node_vl_dist_warp.operation = 'ADD'
+        node_vl_dist_warp.location = (-500, -400)
+        links.new(node_vl_prox.outputs['Distance'], node_vl_dist_warp.inputs[0])
+        links.new(node_warp_mul.outputs[0], node_vl_dist_warp.inputs[1])
 
-        # 3. Map Range (距離をウェイトにマッピング)
+        # 3. Map Range (純粋な連続距離を SMOOTHSTEP でウェイトにマッピング)
         node_vl_map = nodes.new('ShaderNodeMapRange')
         node_vl_map.interpolation_type = 'SMOOTHSTEP'
         node_vl_map.inputs['From Min'].default_value = 0.0
         node_vl_map.inputs['To Min'].default_value = 1.0
         node_vl_map.inputs['To Max'].default_value = 0.0
         node_vl_map.location = (-400, -400)
-        links.new(node_vl_prox.outputs['Distance'], node_vl_map.inputs['Value'])
-        links.new(node_vl_radius_mult.outputs[0], node_vl_map.inputs['From Max'])
+        links.new(node_vl_dist_warp.outputs[0], node_vl_map.inputs['Value'])
+        links.new(node_in.outputs['Valley Radius'], node_vl_map.inputs['From Max'])
 
         # 4. 谷のオブジェクト存在判定 (バイパス処理)
         try:
@@ -608,24 +835,77 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_vl_sum.outputs[0], node_vl_exist.inputs[0])
         node_vl_exist.inputs[1].default_value = 0.0
 
-        # 谷の合計沈下量の算出
-        # 個別深さ（1.0 + tilt）を計算するノード
-        node_vl_height_factor = nodes.new('ShaderNodeMath')
-        node_vl_height_factor.operation = 'ADD'
-        node_vl_height_factor.inputs[1].default_value = 1.0
-        node_vl_height_factor.location = (-350, -550)
-        links.new(node_vl_sample_tilt.outputs['Value'], node_vl_height_factor.inputs[0])
+        # 谷の合計沈下量の算出 (SMOOTHSTEP と連続乗算のみで構成)
+        node_vl_exp_mul = nodes.new('ShaderNodeMath')
+        node_vl_exp_mul.operation = 'MULTIPLY'
+        node_vl_exp_mul.inputs[1].default_value = 0.65
+        node_vl_exp_mul.location = (-380, -450)
+        links.new(node_in.outputs['Ridge Sharpness'], node_vl_exp_mul.inputs[0])
+
+        node_vl_exp = nodes.new('ShaderNodeMath')
+        node_vl_exp.operation = 'ADD'
+        node_vl_exp.inputs[1].default_value = 1.0
+        node_vl_exp.location = (-280, -450)
+        links.new(node_vl_exp_mul.outputs[0], node_vl_exp.inputs[0])
+
+        node_vl_pow = nodes.new('ShaderNodeMath')
+        node_vl_pow.operation = 'POWER'
+        node_vl_pow.use_clamp = False
+        node_vl_pow.location = (-180, -450)
+        links.new(node_vl_map.outputs['Result'], node_vl_pow.inputs[0])
+        links.new(node_vl_exp.outputs[0], node_vl_pow.inputs[1])
+
+        # 谷壁の岩肌変調: 1.0 + (ridged - 0.45) * Detail Strength * 0.5
+        node_vl_rid_sub = nodes.new('ShaderNodeMath')
+        node_vl_rid_sub.operation = 'SUBTRACT'
+        node_vl_rid_sub.inputs[1].default_value = 0.45
+        node_vl_rid_sub.location = (-380, -350)
+        links.new(node_ridged.outputs[0], node_vl_rid_sub.inputs[0])
+
+        node_vl_rid_mul1 = nodes.new('ShaderNodeMath')
+        node_vl_rid_mul1.operation = 'MULTIPLY'
+        node_vl_rid_mul1.location = (-280, -350)
+        links.new(node_vl_rid_sub.outputs[0], node_vl_rid_mul1.inputs[0])
+        links.new(node_in.outputs['Detail Strength'], node_vl_rid_mul1.inputs[1])
+
+        node_vl_rid_mul2 = nodes.new('ShaderNodeMath')
+        node_vl_rid_mul2.operation = 'MULTIPLY'
+        node_vl_rid_mul2.inputs[1].default_value = 0.5
+        node_vl_rid_mul2.location = (-180, -350)
+        links.new(node_vl_rid_mul1.outputs[0], node_vl_rid_mul2.inputs[0])
+
+        node_vl_rid_fac = nodes.new('ShaderNodeMath')
+        node_vl_rid_fac.operation = 'ADD'
+        node_vl_rid_fac.inputs[1].default_value = 1.0
+        node_vl_rid_fac.location = (-80, -350)
+        links.new(node_vl_rid_mul2.outputs[0], node_vl_rid_fac.inputs[0])
+
+        node_vl_shaped = nodes.new('ShaderNodeMath')
+        node_vl_shaped.operation = 'MULTIPLY'
+        node_vl_shaped.location = (-80, -450)
+        links.new(node_vl_pow.outputs[0], node_vl_shaped.inputs[0])
+        links.new(node_vl_rid_fac.outputs[0], node_vl_shaped.inputs[1])
+
+        # 谷の深さバリエーションも 3D 空間の連続ノイズ変調 (SMOOTHSTEP: 0.75 ~ 1.25) で表現
+        node_vl_var_map = nodes.new('ShaderNodeMapRange')
+        node_vl_var_map.interpolation_type = 'SMOOTHSTEP'
+        node_vl_var_map.inputs['From Min'].default_value = 0.0
+        node_vl_var_map.inputs['From Max'].default_value = 1.0
+        node_vl_var_map.inputs['To Min'].default_value = 0.75
+        node_vl_var_map.inputs['To Max'].default_value = 1.25
+        node_vl_var_map.location = (-360, -550)
+        links.new(mt_var_out, node_vl_var_map.inputs['Value'])
 
         node_vl_depth_mult = nodes.new('ShaderNodeMath')
         node_vl_depth_mult.operation = 'MULTIPLY'
         node_vl_depth_mult.location = (-200, -550)
         links.new(node_in.outputs['Valley Depth'], node_vl_depth_mult.inputs[0])
-        links.new(node_vl_height_factor.outputs[0], node_vl_depth_mult.inputs[1])
+        links.new(node_vl_var_map.outputs['Result'], node_vl_depth_mult.inputs[1])
 
         node_vl_mult1 = nodes.new('ShaderNodeMath')
         node_vl_mult1.operation = 'MULTIPLY'
         node_vl_mult1.location = (-200, -400)
-        links.new(node_vl_map.outputs['Result'], node_vl_mult1.inputs[0])
+        links.new(node_vl_shaped.outputs[0], node_vl_mult1.inputs[0])
         links.new(node_vl_depth_mult.outputs[0], node_vl_mult1.inputs[1])
 
         node_vl_depth_final = nodes.new('ShaderNodeMath')
@@ -643,7 +923,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_add_mt = nodes.new('ShaderNodeMath')
         node_add_mt.operation = 'ADD'
         node_add_mt.location = (150, -200)
-        links.new(node_mult.outputs[0], node_add_mt.inputs[0])
+        links.new(node_base_graded.outputs[0], node_add_mt.inputs[0])
         links.new(node_mt_height_final.outputs[0], node_add_mt.inputs[1])
 
         # 2. 上記 - (谷の深さ)
@@ -703,7 +983,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         # 5. Map Range: 距離を平坦化のウェイト(Factor: 0.0 ~ 1.0)にマッピング
         node_map_range = nodes.new('ShaderNodeMapRange')
         node_map_range.location = (900, 650)
-        node_map_range.interpolation_type = 'LINEAR'
+        node_map_range.interpolation_type = 'SMOOTHSTEP'
         node_map_range.inputs['To Min'].default_value = 1.0
         node_map_range.inputs['To Max'].default_value = 0.0
         links.new(node_proximity.outputs['Distance'], node_map_range.inputs['Value'])
@@ -717,13 +997,71 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         links.new(node_in.outputs['Flat Blend'], node_add_blend.inputs[1])
         links.new(node_add_blend.outputs[0], node_map_range.inputs['From Max'])
 
+        # 5.5. トンネル区間内では Flat Radius 平坦化を無効化（山の上の表面を維持）
+        node_tun_col_info = nodes.new('GeometryNodeCollectionInfo')
+        node_tun_col_info.transform_space = 'RELATIVE'
+        node_tun_col_info.location = (500, 820)
+        links.new(node_in.outputs['Tunnel Cutters'], node_tun_col_info.inputs['Collection'])
+
+        node_tun_realize = nodes.new('GeometryNodeRealizeInstances')
+        node_tun_realize.location = (650, 820)
+        links.new(node_tun_col_info.outputs['Instances'], node_tun_realize.inputs['Geometry'])
+
+        try:
+            node_tun_dom = nodes.new('GeometryNodeAttributeDomainSize')
+        except RuntimeError:
+            node_tun_dom = nodes.new('GeometryNodeDomainSize')
+        node_tun_dom.component = 'MESH'
+        node_tun_dom.location = (800, 920)
+        links.new(node_tun_realize.outputs['Geometry'], node_tun_dom.inputs['Geometry'])
+
+        node_tun_exist = nodes.new('ShaderNodeMath')
+        node_tun_exist.operation = 'GREATER_THAN'
+        node_tun_exist.inputs[1].default_value = 0.0
+        node_tun_exist.location = (950, 920)
+        tun_pt_out = node_tun_dom.outputs['Point Count'] if 'Point Count' in node_tun_dom.outputs else node_tun_dom.outputs[0]
+        links.new(tun_pt_out, node_tun_exist.inputs[0])
+
+        node_tun_prox = nodes.new('GeometryNodeProximity')
+        node_tun_prox.target_element = 'FACES'
+        node_tun_prox.location = (800, 800)
+        links.new(node_tun_realize.outputs['Geometry'], node_tun_prox.inputs['Target'])
+
+        node_tun_mask = nodes.new('ShaderNodeMapRange')
+        node_tun_mask.interpolation_type = 'SMOOTHSTEP'
+        node_tun_mask.inputs['From Min'].default_value = 32.0
+        node_tun_mask.inputs['From Max'].default_value = 75.0
+        node_tun_mask.inputs['To Min'].default_value = 0.0
+        node_tun_mask.inputs['To Max'].default_value = 1.0
+        node_tun_mask.location = (950, 800)
+        links.new(node_tun_prox.outputs['Distance'], node_tun_mask.inputs['Value'])
+
+        # トンネルが無い場合は 1.0、ある場合は node_tun_mask（Blender全バージョン互換の Math 構成）
+        node_tun_inv = nodes.new('ShaderNodeMath')
+        node_tun_inv.operation = 'SUBTRACT'
+        node_tun_inv.inputs[0].default_value = 1.0
+        node_tun_inv.location = (1050, 920)
+        links.new(node_tun_exist.outputs[0], node_tun_inv.inputs[1])
+
+        node_tun_mix = nodes.new('ShaderNodeMath')
+        node_tun_mix.operation = 'MAXIMUM'
+        node_tun_mix.location = (1100, 820)
+        links.new(node_tun_inv.outputs[0], node_tun_mix.inputs[0])
+        links.new(node_tun_mask.outputs['Result'], node_tun_mix.inputs[1])
+
+        node_flat_masked = nodes.new('ShaderNodeMath')
+        node_flat_masked.operation = 'MULTIPLY'
+        node_flat_masked.location = (1150, 620)
+        links.new(node_map_range.outputs['Result'], node_flat_masked.inputs[0])
+        links.new(node_tun_mix.outputs[0], node_flat_masked.inputs[1])
+
         # 6. 線形補間(Lerp)の計算 (Mix Float ノードの互換性対策)
-        # Z-fightingおよび道路が埋まるのを防ぐため、道路より地形を0.3m下げる
+        # Z-fightingおよび道路が埋まるのを防ぐため、道路より地形を1.2m下げる
         node_offset_z = nodes.new('ShaderNodeMath')
         node_offset_z.operation = 'SUBTRACT'
         node_offset_z.location = (1000, 400)
         links.new(node_sep_prox.outputs['Z'], node_offset_z.inputs[0])
-        node_offset_z.inputs[1].default_value = 0.3
+        node_offset_z.inputs[1].default_value = 1.2
 
         # MixZ = CurrZ + ((ProxZ - 0.1) - CurrZ) * Factor
         # (A) (ProxZ - 0.1) - CurrZ
@@ -738,7 +1076,7 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
         node_mult_factor.operation = 'MULTIPLY'
         node_mult_factor.location = (1250, 400)
         links.new(node_diff.outputs[0], node_mult_factor.inputs[0])
-        links.new(node_map_range.outputs['Result'], node_mult_factor.inputs[1])
+        links.new(node_flat_masked.outputs[0], node_mult_factor.inputs[1])
 
         # (C) CurrZ + ...
         node_mix_z = nodes.new('ShaderNodeMath')
@@ -811,36 +1149,40 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
 
 
         # ==========================================
-        # (E) 穴あけの基礎 (Mesh Boolean)
+        # (E) トンネル坑口の穴あけ (Delete Geometry: FACE ドメイン)
         # ==========================================
-        # 1. Ico Sphere ノード
-        node_ico = nodes.new('GeometryNodeMeshIcoSphere')
-        node_ico.location = (1150, -100)
-        node_ico.inputs['Subdivisions'].default_value = 3
-        links.new(node_in.outputs['Hole Size'], node_ico.inputs['Radius'])
+        # 厚みゼロの平面グリッドで破綻する Mesh Boolean を廃止し、
+        # TunnelCutters との距離が 32.0m 未満の FACE を Delete Geometry で確実に削除する
+        node_tun_del_lt = nodes.new('ShaderNodeMath')
+        node_tun_del_lt.operation = 'LESS_THAN'
+        node_tun_del_lt.inputs[1].default_value = 32.0
+        node_tun_del_lt.location = (1350, -100)
+        links.new(node_tun_prox.outputs['Distance'], node_tun_del_lt.inputs[0])
 
-        # 2. Transform Geometry
-        node_trans = nodes.new('GeometryNodeTransform')
-        node_trans.location = (1350, -100)
-        ico_mesh_out = node_ico.outputs['Mesh'] if 'Mesh' in node_ico.outputs else node_ico.outputs[0]
-        links.new(ico_mesh_out, node_trans.inputs['Geometry'])
-        
-        if 'Translation' in node_trans.inputs:
-            links.new(node_in.outputs['Hole Location'], node_trans.inputs['Translation'])
+        node_tun_del_sel = nodes.new('ShaderNodeMath')
+        node_tun_del_sel.operation = 'MULTIPLY'
+        node_tun_del_sel.location = (1480, -100)
+        links.new(node_tun_del_lt.outputs[0], node_tun_del_sel.inputs[0])
+        links.new(node_tun_exist.outputs[0], node_tun_del_sel.inputs[1])
 
-        # 3. Mesh Boolean
-        node_boolean = nodes.new('GeometryNodeMeshBoolean')
-        node_boolean.operation = 'DIFFERENCE'
-        node_boolean.location = (1600, -100)
-        links.new(node_set_flat.outputs['Geometry'], node_boolean.inputs['Mesh 1'])
-        trans_geo_out = node_trans.outputs['Geometry'] if 'Geometry' in node_trans.outputs else node_trans.outputs[0]
-        links.new(trans_geo_out, node_boolean.inputs['Mesh 2'])
+        node_del_geo = nodes.new('GeometryNodeDeleteGeometry')
+        node_del_geo.domain = 'FACE'
+        node_del_geo.mode = 'ALL'
+        node_del_geo.location = (1600, -100)
+        links.new(node_set_flat.outputs['Geometry'], node_del_geo.inputs['Geometry'])
+        links.new(node_tun_del_sel.outputs[0], node_del_geo.inputs['Selection'])
+
+        # スムースシェーディングの適用（カクカクしたローポリ表示を解消）
+        node_shade_smooth = nodes.new('GeometryNodeSetShadeSmooth')
+        node_shade_smooth.location = (1680, -100)
+        if 'Shade Smooth' in node_shade_smooth.inputs:
+            node_shade_smooth.inputs['Shade Smooth'].default_value = True
+        links.new(node_del_geo.outputs['Geometry'], node_shade_smooth.inputs['Geometry'])
 
         # 出力を最終的なGeometryに接続 (Set Material ノードを通してマテリアルを確実に反映)
         node_set_mat = nodes.new('GeometryNodeSetMaterial')
-        node_set_mat.location = (1750, -100)
-        boolean_mesh_out = node_boolean.outputs['Mesh'] if 'Mesh' in node_boolean.outputs else node_boolean.outputs[0]
-        links.new(boolean_mesh_out, node_set_mat.inputs['Geometry'])
+        node_set_mat.location = (1850, -100)
+        links.new(node_shade_smooth.outputs['Geometry'], node_set_mat.inputs['Geometry'])
         links.new(node_set_mat.outputs['Geometry'], node_out.inputs['Geometry'])
 
 
@@ -948,14 +1290,20 @@ class MYADDON_OT_create_terrain(bpy.types.Operator):
                 pass
             return False
 
+        default_ridge = 0.25 if self.preset == 'FLAT' else (0.75 if self.preset == 'MOUNTAINS' else 0.45)
+        default_detail = 0.20 if self.preset == 'FLAT' else (0.50 if self.preset == 'MOUNTAINS' else 0.35)
         set_gn_input(gn_mod, group, 'Terrain Height', preset_height)
         set_gn_input(gn_mod, group, 'Noise Scale', preset_noise)
+        set_gn_input(gn_mod, group, 'Ridge Sharpness', default_ridge)
+        set_gn_input(gn_mod, group, 'Detail Strength', default_detail)
         set_gn_input(gn_mod, group, 'Grid Size X', target_size)
         set_gn_input(gn_mod, group, 'Grid Size Y', target_size)
         set_gn_input(gn_mod, group, 'Mountain Height', mt_height)
         set_gn_input(gn_mod, group, 'Mountain Radius', mt_radius)
         set_gn_input(gn_mod, group, 'Valley Depth', val_depth)
         set_gn_input(gn_mod, group, 'Valley Radius', val_radius)
+        set_gn_input(gn_mod, group, 'Flat Radius', 65.0)
+        set_gn_input(gn_mod, group, 'Flat Blend', 180.0)
         
         # 既存コレクション・オブジェクトの自動アサイン
         val_col = bpy.data.collections.get("Valleys")
