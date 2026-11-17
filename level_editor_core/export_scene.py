@@ -187,14 +187,21 @@ class MYADDON_OT_export_chunks(bpy.types.Operator, bpy_extras.io_utils.ExportHel
 
     export_lod: bpy.props.BoolProperty(
         name="LODを出力",
-        description="LOD0〜LOD3のポリゴン削減モデルを生成して出力するかどうか（一時無効化時はFalse）",
-        default=False,
+        description="LOD0〜LOD3のポリゴン削減モデルを生成して出力するかどうか",
+        default=True,
+    ) # type: ignore
+
+    use_heightmap_chunks: bpy.props.BoolProperty(
+        name="ハイトマップからシームレス分割",
+        description="AIハイトマップが存在する場合、境界隙間なし・高速LOD0-3・ベイクテクスチャ付きで直接チャンク出力します",
+        default=True,
     ) # type: ignore
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "chunk_size")
         layout.prop(self, "export_lod")
+        layout.prop(self, "use_heightmap_chunks")
 
     def execute(self, context):
         print(f"チャンク並行エクスポートを開始します (サイズ: {self.chunk_size}m, LOD: {self.export_lod})")
@@ -204,6 +211,17 @@ class MYADDON_OT_export_chunks(bpy.types.Operator, bpy_extras.io_utils.ExportHel
             export_dir = self.filepath
             
         os.makedirs(export_dir, exist_ok=True)
+
+        # ハイトマップキャッシュが存在する場合はシームレス高速出力を優先
+        terrain_obj = bpy.data.objects.get("Terrain")
+        if self.use_heightmap_chunks and terrain_obj and "tl1_heightmap_dir" in terrain_obj:
+            hm_dir = terrain_obj["tl1_heightmap_dir"]
+            hm_path = os.path.join(hm_dir, "heightmap.npy")
+            meta_path = os.path.join(hm_dir, "heightmap_meta.json")
+            if os.path.exists(hm_path) and os.path.exists(meta_path):
+                count = self._export_seamless_heightmap_chunks(hm_dir, export_dir)
+                self.report({'INFO'}, f"シームレスチャンク出力完了: {count}チャンク")
+                return {'FINISHED'}
         
         # 1. チャンクの全体範囲を決定
         mesh_objs = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH' and obj.visible_get()]
@@ -464,3 +482,194 @@ with open(res_json, 'w', encoding='utf-8') as f:
 """
         with open(path, 'w', encoding='utf-8') as f:
             f.write(code)
+
+    def _export_seamless_heightmap_chunks(self, hm_dir, export_dir):
+        """
+        NumPyハイトマップから境界頂点・法線を厳密共有したシームレスチャンクOBJ＋MTL＋LOD0〜3を出力する。
+        """
+        import shutil
+        import numpy as np  # type: ignore
+
+        heightmap = np.load(os.path.join(hm_dir, "heightmap.npy"))
+        with open(os.path.join(hm_dir, "heightmap_meta.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+        res_y, res_x = heightmap.shape
+        size_x = float(meta.get("terrain_size_x", 40000.0))
+        size_y = float(meta.get("terrain_size_y", size_x))
+        half_x = size_x * 0.5
+        half_y = size_y * 0.5
+        cell_x = size_x / float(res_x - 1)
+        cell_y = size_y / float(res_y - 1)
+
+        # 全体ハイトマップ上で法線を一括計算（チャンク境界での法線継ぎ目をゼロにする）
+        gy, gx = np.gradient(heightmap.astype(np.float32), cell_y, cell_x)
+        nx_all = -gx
+        ny_all = -gy
+        nz_all = np.ones_like(gx, dtype=np.float32)
+        inv_len = 1.0 / np.sqrt(nx_all * nx_all + ny_all * ny_all + nz_all * nz_all)
+        nx_all *= inv_len
+        ny_all *= inv_len
+        nz_all *= inv_len
+
+        # ベイクテクスチャを出力先へコピーし、共通 MTL を生成
+        for tex_name in ("terrain_albedo.png", "terrain_normal.png", "terrain_splat.png", "shore_sdf.png"):
+            src_tex = os.path.join(hm_dir, tex_name)
+            if os.path.exists(src_tex):
+                shutil.copy2(src_tex, os.path.join(export_dir, tex_name))
+
+        mtl_name = "terrain_chunks.mtl"
+        mtl_path = os.path.join(export_dir, mtl_name)
+        with open(mtl_path, "w", encoding="utf-8") as mf:
+            mf.write("newmtl TerrainBakedMat\n")
+            mf.write("Ka 0.15 0.15 0.15\n")
+            mf.write("Kd 1.0 1.0 1.0\n")
+            mf.write("Ks 0.05 0.05 0.05\n")
+            mf.write("Ns 16.0\n")
+            if os.path.exists(os.path.join(export_dir, "terrain_albedo.png")):
+                mf.write("map_Kd terrain_albedo.png\n")
+            if os.path.exists(os.path.join(export_dir, "terrain_normal.png")):
+                mf.write("map_Bump terrain_normal.png\n")
+
+        start_cx = math.floor(-half_x / self.chunk_size)
+        end_cx = math.ceil(half_x / self.chunk_size) - 1
+        start_cy = math.floor(-half_y / self.chunk_size)
+        end_cy = math.ceil(half_y / self.chunk_size) - 1
+
+        lod_steps = [(0, 1), (1, 2), (2, 4), (3, 8)] if self.export_lod else [(0, 1)]
+        all_chunk_info = []
+
+        for cx in range(start_cx, end_cx + 1):
+            for cy in range(start_cy, end_cy + 1):
+                c_min_x = cx * self.chunk_size
+                c_max_x = (cx + 1) * self.chunk_size
+                c_min_y = cy * self.chunk_size
+                c_max_y = (cy + 1) * self.chunk_size
+
+                ix0 = max(0, int(round((c_min_x + half_x) / cell_x)))
+                ix1 = min(res_x - 1, int(round((c_max_x + half_x) / cell_x)))
+                iy0 = max(0, int(round((c_min_y + half_y) / cell_y)))
+                iy1 = min(res_y - 1, int(round((c_max_y + half_y) / cell_y)))
+                if ix1 <= ix0 or iy1 <= iy0:
+                    continue
+
+                norm_x = cx - start_cx
+                norm_y = cy - start_cy
+                chunk_files = []
+
+                for lod_idx, step in lod_steps:
+                    xs_idx = np.arange(ix0, ix1 + 1, step, dtype=np.int32)
+                    if xs_idx[-1] != ix1:
+                        xs_idx = np.append(xs_idx, ix1)
+                    ys_idx = np.arange(iy0, iy1 + 1, step, dtype=np.int32)
+                    if ys_idx[-1] != iy1:
+                        ys_idx = np.append(ys_idx, iy1)
+
+                    sub_h = heightmap[np.ix_(ys_idx, xs_idx)]
+                    sub_nx = nx_all[np.ix_(ys_idx, xs_idx)]
+                    sub_ny = ny_all[np.ix_(ys_idx, xs_idx)]
+                    sub_nz = nz_all[np.ix_(ys_idx, xs_idx)]
+
+                    wx = -half_x + xs_idx.astype(np.float32) * cell_x
+                    wy = -half_y + ys_idx.astype(np.float32) * cell_y
+                    gx_m, gy_m = np.meshgrid(wx, wy, indexing="xy")
+
+                    u_m = (gx_m + half_x) / max(size_x, 1.0)
+                    v_m = (gy_m + half_y) / max(size_y, 1.0)
+
+                    ny_c, nx_c = sub_h.shape
+                    obj_name = f"chunk{norm_x}-{norm_y}_LOD{lod_idx}.obj"
+                    chunk_files.append(obj_name)
+                    obj_path = os.path.join(export_dir, obj_name)
+
+                    with open(obj_path, "w", encoding="utf-8") as of:
+                        of.write(f"mtllib {mtl_name}\n")
+                        of.write(f"o chunk_{norm_x}_{norm_y}_LOD{lod_idx}\n")
+                        of.write("usemtl TerrainBakedMat\n")
+
+                        # 頂点 (v), UV (vt), 法線 (vn) - Blender標準obj_exportと同一の Y-up (X, Z, -Y) に変換
+                        vx_f = gx_m.ravel()
+                        vy_f = sub_h.ravel()
+                        vz_f = -gy_m.ravel()
+                        u_f = u_m.ravel()
+                        v_f = v_m.ravel()
+                        nx_f = sub_nx.ravel()
+                        ny_f = sub_nz.ravel()
+                        nz_f = -sub_ny.ravel()
+
+                        v_lines = [f"v {vx_f[i]:.3f} {vy_f[i]:.3f} {vz_f[i]:.3f}\n" for i in range(vx_f.size)]
+                        vt_lines = [f"vt {u_f[i]:.5f} {v_f[i]:.5f}\n" for i in range(u_f.size)]
+                        vn_lines = [f"vn {nx_f[i]:.4f} {ny_f[i]:.4f} {nz_f[i]:.4f}\n" for i in range(nx_f.size)]
+                        of.writelines(v_lines)
+                        of.writelines(vt_lines)
+                        of.writelines(vn_lines)
+
+                        f_lines = []
+                        for r in range(ny_c - 1):
+                            row_base = r * nx_c + 1
+                            next_base = (r + 1) * nx_c + 1
+                            for c in range(nx_c - 1):
+                                i0 = row_base + c
+                                i1 = i0 + 1
+                                i2 = next_base + c + 1
+                                i3 = next_base + c
+                                f_lines.append(
+                                    f"f {i0}/{i0}/{i0} {i1}/{i1}/{i1} {i2}/{i2}/{i2} {i3}/{i3}/{i3}\n"
+                                )
+                        of.writelines(f_lines)
+
+                all_chunk_info.append({
+                    "grid_x": norm_x,
+                    "grid_y": norm_y,
+                    "world_cx": cx,
+                    "world_cy": cy,
+                    "min_x": c_min_x,
+                    "max_x": c_max_x,
+                    "min_y": c_min_y,
+                    "max_y": c_max_y,
+                    "center": [(c_min_x + c_max_x) / 2.0, (c_min_y + c_max_y) / 2.0, 0.0],
+                    "lod_files": chunk_files,
+                    "file": chunk_files[0] if chunk_files else "",
+                    "textures": {
+                        "albedo": "terrain_albedo.png",
+                        "normal": "terrain_normal.png",
+                        "splat": "terrain_splat.png",
+                    },
+                })
+
+        # 水面メッシュ (RiverMesh_AI / WaterPlane_AI) の個別エクスポート
+        def _export_single_obj(obj_name, out_filename):
+            w_obj = bpy.data.objects.get(obj_name)
+            if not w_obj or w_obj.type != 'MESH':
+                return None
+            out_p = os.path.join(export_dir, out_filename)
+            bpy.ops.object.select_all(action='DESELECT')
+            w_obj.select_set(True)
+            if hasattr(bpy.ops.wm, "obj_export"):
+                bpy.ops.wm.obj_export(filepath=out_p, export_selected_objects=True, export_triangulated_mesh=True, export_materials=True, apply_modifiers=True)
+            else:
+                bpy.ops.export_scene.obj(filepath=out_p, use_selection=True, use_mesh_modifiers=True, use_materials=True, use_triangles=True)
+            return out_filename if os.path.exists(out_p) else None
+
+        river_mesh_file = _export_single_obj("RiverMesh_AI", "river_mesh.obj")
+        ocean_mesh_file = _export_single_obj("WaterPlane_AI", "ocean_plane.obj")
+        if ocean_mesh_file and os.path.exists(os.path.join(export_dir, "shore_sdf.png")):
+            ocean_mtl = os.path.join(export_dir, "ocean_plane.mtl")
+            if os.path.exists(ocean_mtl):
+                with open(ocean_mtl, "a", encoding="utf-8") as omf:
+                    omf.write("\nmap_Kd shore_sdf.png\n")
+
+        final_json = os.path.join(export_dir, "chunks_info.json")
+        out_payload = {
+            "chunks": all_chunk_info,
+            "water_level": meta.get("water_level"),
+            "has_ocean": bool(meta.get("has_ocean", False)),
+            "shore_sdf": "shore_sdf.png" if os.path.exists(os.path.join(export_dir, "shore_sdf.png")) else None,
+            "river_mesh": river_mesh_file,
+            "ocean_mesh": ocean_mesh_file,
+            "rivers": meta.get("rivers", []),
+        }
+        with open(final_json, "w", encoding="utf-8") as jf:
+            json.dump(out_payload, jf, ensure_ascii=False, indent=4)
+
+        return len(all_chunk_info)

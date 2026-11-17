@@ -1,8 +1,28 @@
 # -*- coding: utf-8 -*-
+import importlib
+import sys
 import bpy
 
+_SUBMODULES = (
+    "blueprint_store",
+    "terrain_materials",
+    "terrain_blueprint",
+    "heightmap_engine",
+    "terrain_baker",
+    "water_mesh_builder",
+    "terrain_pipeline",
+    "create_terrain",
+    "ai_terrain",
+    "mcp_server",
+    "menu",
+)
+for _sub in _SUBMODULES:
+    _full = f"{__name__}.{_sub}"
+    if _full in sys.modules:
+        importlib.reload(sys.modules[_full])
+
 from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
-from .ai_terrain import MYADDON_OT_ai_generate_terrain
+from .ai_terrain import MYADDON_OT_ai_generate_terrain, MYADDON_OT_rebuild_from_curves, VIEW3D_PT_tl1_terrain_sync
 from .mcp_server import MYADDON_OT_start_mcp_server, MYADDON_OT_stop_mcp_server
 from .menu import TOPBAR_MT_terrain_menu
 
@@ -25,6 +45,8 @@ classes = [
     MYADDON_OT_create_mountain_along_spline,
     MYADDON_OT_create_valley_along_spline,
     MYADDON_OT_ai_generate_terrain,
+    MYADDON_OT_rebuild_from_curves,
+    VIEW3D_PT_tl1_terrain_sync,
     MYADDON_OT_start_mcp_server,
     MYADDON_OT_stop_mcp_server
 ]

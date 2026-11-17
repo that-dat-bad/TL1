@@ -1,10 +1,22 @@
 # -*- coding: utf-8 -*-
 
 import bpy  # type: ignore
+import base64
 import json
+import os
 import queue
+import tempfile
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+try:
+    from .blueprint_store import load_blueprint
+    from .heightmap_engine import get_cached_heightmap
+    from .terrain_pipeline import execute_blueprint_pipeline
+except ImportError:
+    from blueprint_store import load_blueprint
+    from heightmap_engine import get_cached_heightmap
+    from terrain_pipeline import execute_blueprint_pipeline
 
 # グローバルサーバーインスタンス
 _mcp_server_instance = None
@@ -132,6 +144,88 @@ def _post_terrain_params(data):
     return {"status": "ok", "updated": updated_keys}
 
 
+def _get_blueprint():
+    """現在の永続化ブループリントとメタデータを取得（メインスレッド専用）"""
+    bp, meta = load_blueprint(bpy.context.scene)
+    if bp is None:
+        return {"blueprint": None, "meta": {}, "message": "No blueprint saved in scene yet"}
+    return {"blueprint": bp, "meta": meta}
+
+
+def _post_blueprint(data):
+    """ブループリント全体または差分パッチを適用し、地形を再生成する（メインスレッド専用）"""
+    payload = data.get("blueprint", data)
+    is_patch = bool(data.get("is_patch", False)) or (isinstance(payload, dict) and "operations" in payload)
+    preset = data.get("preset", "AUTO")
+    terrain_scale = data.get("terrain_scale", "40KM")
+    biome = data.get("biome", "AUTO")
+    prompt = data.get("prompt", "")
+    seed = int(data.get("seed", 0) or 0)
+    resolution = int(data.get("resolution", 1024) or 1024)
+
+    final_bp, hm_meta, tex_paths = execute_blueprint_pipeline(
+        bpy.context,
+        payload,
+        preset=preset,
+        terrain_scale=terrain_scale,
+        biome=biome,
+        prompt=prompt,
+        seed=seed,
+        resolution=resolution,
+        is_patch=is_patch,
+        operator=None,
+    )
+    return {
+        "status": "ok",
+        "blueprint": final_bp,
+        "meta": hm_meta,
+        "textures": tex_paths,
+    }
+
+
+def _get_terrain_stats():
+    """ハイトマップの統計情報を取得（メインスレッド専用）"""
+    cached = get_cached_heightmap("Terrain")
+    if cached is not None:
+        _, _, meta = cached
+        return {"status": "ok", "meta": meta}
+
+    terrain_obj = bpy.data.objects.get("Terrain")
+    if terrain_obj and "tl1_heightmap_dir" in terrain_obj:
+        meta_path = os.path.join(terrain_obj["tl1_heightmap_dir"], "heightmap_meta.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return {"status": "ok", "meta": json.load(f)}
+
+    return {"error": "No heightmap stats available yet", "code": 404}
+
+
+def _capture_viewport():
+    """3Dビューポートの俯瞰/現在視点プレビューPNGを撮影してBase64で返す（メインスレッド専用）"""
+    scene = bpy.context.scene
+    out_path = os.path.join(tempfile.gettempdir(), "tl1_mcp_viewport_capture.png")
+    old_filepath = scene.render.filepath
+    old_res_x = scene.render.resolution_x
+    old_res_y = scene.render.resolution_y
+    try:
+        scene.render.filepath = out_path
+        scene.render.resolution_x = 768
+        scene.render.resolution_y = 768
+        scene.render.image_settings.file_format = 'PNG'
+        bpy.ops.render.opengl(write_still=True)
+        if not os.path.exists(out_path):
+            return {"error": "Viewport capture failed to produce image", "code": 500}
+        with open(out_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return {"status": "ok", "path": out_path, "mime_type": "image/png", "base64": b64}
+    except Exception as e:
+        return {"error": f"Capture failed: {e}", "code": 500}
+    finally:
+        scene.render.filepath = old_filepath
+        scene.render.resolution_x = old_res_x
+        scene.render.resolution_y = old_res_y
+
+
 def _read_modifier_params(mod):
     """モディファイアからパラメータを辞書に読み取る"""
     params = {}
@@ -218,6 +312,12 @@ class TerrainMCPHandler(BaseHTTPRequestHandler):
             self._handle_get_terrain_params()
         elif self.path == "/terrain/status":
             self._handle_get_status()
+        elif self.path == "/terrain/blueprint":
+            self._handle_get_blueprint()
+        elif self.path == "/terrain/stats":
+            self._handle_get_stats()
+        elif self.path == "/terrain/capture":
+            self._handle_get_capture()
         elif self.path == "/":
             self._handle_root()
         else:
@@ -227,6 +327,8 @@ class TerrainMCPHandler(BaseHTTPRequestHandler):
         """POSTリクエストの処理"""
         if self.path == "/terrain/params":
             self._handle_post_terrain_params()
+        elif self.path == "/terrain/blueprint":
+            self._handle_post_blueprint()
         else:
             self._send_error(404, "Not Found")
 
@@ -234,12 +336,16 @@ class TerrainMCPHandler(BaseHTTPRequestHandler):
         """ルートエンドポイント - サーバー情報を返す（bpy不使用なのでスレッドセーフ）"""
         info = {
             "server": "Blender Terrain MCP Server",
-            "version": "1.0.0",
+            "version": "2.0.0",
             "protocol": "MCP",
             "endpoints": [
                 "GET /terrain/params",
                 "GET /terrain/status",
-                "POST /terrain/params"
+                "POST /terrain/params",
+                "GET /terrain/blueprint",
+                "POST /terrain/blueprint",
+                "GET /terrain/stats",
+                "GET /terrain/capture"
             ]
         }
         self._send_json(info)
@@ -276,6 +382,54 @@ class TerrainMCPHandler(BaseHTTPRequestHandler):
 
         try:
             result = _dispatch_to_main_thread(_post_terrain_params, data)
+            if "error" in result:
+                self._send_error(result.get("code", 500), result["error"])
+            else:
+                self._send_json(result)
+        except Exception as e:
+            self._send_error(500, f"Internal error: {e}")
+
+    def _handle_get_blueprint(self):
+        try:
+            result = _dispatch_to_main_thread(_get_blueprint)
+            self._send_json(result)
+        except Exception as e:
+            self._send_error(500, f"Internal error: {e}")
+
+    def _handle_post_blueprint(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            self._send_error(400, "Empty request body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError:
+            self._send_error(400, "Invalid JSON")
+            return
+        try:
+            # 再生成に数秒かかるためタイムアウトを延長
+            result = _dispatch_to_main_thread(_post_blueprint, data, timeout=60.0)
+            if "error" in result:
+                self._send_error(result.get("code", 500), result["error"])
+            else:
+                self._send_json(result)
+        except Exception as e:
+            self._send_error(500, f"Internal error: {e}")
+
+    def _handle_get_stats(self):
+        try:
+            result = _dispatch_to_main_thread(_get_terrain_stats)
+            if "error" in result:
+                self._send_error(result.get("code", 404), result["error"])
+            else:
+                self._send_json(result)
+        except Exception as e:
+            self._send_error(500, f"Internal error: {e}")
+
+    def _handle_get_capture(self):
+        try:
+            result = _dispatch_to_main_thread(_capture_viewport, timeout=15.0)
             if "error" in result:
                 self._send_error(result.get("code", 500), result["error"])
             else:

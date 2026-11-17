@@ -809,13 +809,21 @@ def compile_blueprint(raw_data, preset="AUTO", terrain_scale="40KM", prompt="", 
     city_zones = []
     city_bound = bound * 0.78
 
+    p_low_city = (prompt or "").lower()
+    wants_city_in_prompt = (not p_low_city.strip()) or any(
+        k in p_low_city for k in (
+            "街", "都市", "町", "村", "ビル", "建物", "住宅", "市街", "都心", "集落", "基地",
+            "city", "town", "village", "urban", "metropolis", "building", "settlement", "downtown",
+        )
+    )
+
     for z_idx, zone in enumerate(zones):
         if not isinstance(zone, dict):
             continue
         z_type = str(zone.get("type", "")).upper().strip()
         region = str(zone.get("region", "CENTER")).upper().strip()
 
-        if z_type in ("CITY", "TOWN", "METROPOLIS", "SETTLEMENT"):
+        if z_type in ("CITY", "TOWN", "METROPOLIS", "SETTLEMENT") and wants_city_in_prompt:
             has_city = True
             raw_sc = float(zone.get("scale", 8.0 if is_full_map_city else 1.0))
             if is_full_map_city:
@@ -1116,6 +1124,78 @@ def compile_blueprint(raw_data, preset="AUTO", terrain_scale="40KM", prompt="", 
 
     city_grade_radius = (bound * 1.15 if is_full_map_city else (3800.0 * _clamp(city_scale, 0.7, 1.5))) if has_city else 0.0
     city_style = detect_city_style(prompt=prompt, archetype=archetype, seed=active_seed)
+
+    # 水系（海・海岸線・河川）のコンパイル
+    ocean_cfg = None
+    rivers = []
+    zones_list = raw_data.get("zones", []) if isinstance(raw_data, dict) else []
+    p_low = (prompt or "").lower()
+
+    for idx_z, z in enumerate(zones_list):
+        if not isinstance(z, dict):
+            continue
+        z_type = str(z.get("type", "")).upper().strip()
+        z_reg = str(z.get("region", "SOUTH")).upper().strip()
+
+        if z_type in ("COASTLINE", "OCEAN", "SEA"):
+            if water_level is None:
+                water_level = 0.0
+            valid_ocean_regs = ("NORTH", "SOUTH", "EAST", "WEST", "NORTH_EAST", "NORTH_WEST", "SOUTH_EAST", "SOUTH_WEST", "ISLAND", "PERIMETER")
+            ocean_cfg = {
+                "region": z_reg if z_reg in valid_ocean_regs else ("ISLAND" if any(k in p_low for k in ("島", "孤島", "離島", "island", "atoll")) else "SOUTH"),
+                "depth": float(z.get("depth_scale", 1.0)) * 75.0,
+                "shore_offset": float(z.get("shore_offset", 0.32)),
+            }
+        elif z_type == "RIVER":
+            p_s, p_e = _resolve_region_span(z_reg, bound, orientation=orientation, is_mountain=False)
+            w_scale = _clamp(float(z.get("width_scale", 1.0)), 0.4, 3.0)
+            d_scale = _clamp(float(z.get("depth_scale", 1.0)), 0.4, 3.0)
+            r_pts = _build_winding_feature_spline(
+                p_s,
+                p_e,
+                bound=bound,
+                num_pts=14,
+                meander_amp=0.18,
+                height_scale=1.0,
+                width_scale=w_scale,
+                seed=active_seed + 300 + idx_z * 19,
+                taper_ends=False,
+                start_tilt=0.0,
+                end_tilt=0.0,
+            )
+            rivers.append({
+                "pts": r_pts,
+                "width": 120.0 * w_scale,
+                "depth": 18.0 * d_scale,
+            })
+
+    # プロンプトやアーキタイプに海/川/島が含まれる場合の自動補完
+    is_island_prompt = any(k in p_low for k in ("島", "孤島", "離島", "island", "atoll", "archipelago"))
+    if ocean_cfg is None and (
+        str(archetype).upper() == "COASTAL_RIDGE"
+        or water_level is not None
+        or is_island_prompt
+        or any(k in p_low for k in ("海", "海岸", "ocean", "sea", "coast", "beach", "bay"))
+    ):
+        if water_level is None:
+            water_level = 0.0
+        ocean_region = "ISLAND" if is_island_prompt else "SOUTH"
+        if not is_island_prompt:
+            if any(k in p_low for k in ("北の海", "北側が海")):
+                ocean_region = "NORTH"
+            elif any(k in p_low for k in ("東の海", "東側が海")):
+                ocean_region = "EAST"
+            elif any(k in p_low for k in ("西の海", "西側が海")):
+                ocean_region = "WEST"
+        ocean_cfg = {"region": ocean_region, "depth": 80.0, "shore_offset": 0.32}
+
+    if not rivers and any(k in p_low for k in ("川", "河川", "大河", "渓流", "river", "stream")):
+        p_s, p_e = _resolve_region_span("NORTH_TO_SOUTH", bound, orientation=orientation, is_mountain=False)
+        r_pts = _build_winding_feature_spline(
+            p_s, p_e, bound=bound, num_pts=14, meander_amp=0.18,
+            seed=active_seed + 313, taper_ends=False, start_tilt=0.0, end_tilt=0.0,
+        )
+        rivers.append({"pts": r_pts, "width": 120.0, "depth": 18.0})
     has_tunnels = (
         bool(mountains)
         or bool(raw_data.get("has_tunnels", False))
@@ -1147,6 +1227,8 @@ def compile_blueprint(raw_data, preset="AUTO", terrain_scale="40KM", prompt="", 
         "valley_depth": valley_depth,
         "valley_radius": valley_radius,
         "water_level": water_level,
+        "ocean": ocean_cfg,
+        "rivers": rivers,
         "has_city": has_city,
         "city_center": city_center,
         "city_scale": city_scale,

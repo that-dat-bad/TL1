@@ -33,14 +33,19 @@ class TerrainChunkLoader:
     CHUNK_OBJ_PREFIX = "Terrain_"
 
     @classmethod
-    def load_chunks_for_mode(cls, context: Context) -> Tuple[int, int, str]:
+    def load_chunks_for_mode(cls, context: Context, terrain_info_path: Optional[str] = None) -> Tuple[int, int, str]:
         """
-        Resources/terrains/demo/chunks_info.json から全地形チャンクを読み込み、
+        ゲーム側指定（未指定時は PathConstants.TERRAIN_INFO_REL_PATH）から全地形チャンクを読み込み、
         00_Terrain コレクション内の単一結合メッシュ (Terrain_FullMap) として構築する。
         """
         scene = context.scene
-        info_path = RepoPathResolver.resolve_path(scene, PathConstants.TERRAIN_INFO_REL_PATH)
-        terrain_dir = RepoPathResolver.resolve_path(scene, PathConstants.TERRAIN_DIR_REL)
+        if terrain_info_path:
+            p = Path(terrain_info_path)
+            info_path = p if p.is_absolute() else RepoPathResolver.resolve_path(scene, terrain_info_path)
+            terrain_dir = info_path.parent
+        else:
+            info_path = RepoPathResolver.resolve_path(scene, PathConstants.TERRAIN_INFO_REL_PATH)
+            terrain_dir = RepoPathResolver.resolve_path(scene, PathConstants.TERRAIN_DIR_REL)
 
         if not info_path.exists():
             return (
@@ -52,15 +57,17 @@ class TerrainChunkLoader:
         hierarchy = CollectionHelper.ensure_mission_hierarchy(scene)
         terrain_col = hierarchy[CollectionNames.TERRAIN]
 
-        # 既に結合済み全地形が存在する場合はスキップ
+        # 既に同一パスの結合済み全地形が存在する場合はスキップ（別地形なら差し替え）
         existing_full = terrain_col.objects.get(TerrainDefaults.FULL_TERRAIN_OBJECT_NAME)
         if existing_full is not None and existing_full.type == "MESH" and existing_full.data is not None:
-            if len(existing_full.data.vertices) > MathConstants.ZERO_INT:
+            loaded_src = existing_full.get("tl1_mission_terrain_path", "")
+            if len(existing_full.data.vertices) > MathConstants.ZERO_INT and (not loaded_src or loaded_src == str(info_path)):
                 return (
                     MathConstants.ZERO_INT,
                     MathConstants.ONE_INT,
                     "全地形メッシュ (Terrain_FullMap) は既にロード済みです",
                 )
+            bpy.data.objects.remove(existing_full, do_unlink=True)
 
         with open(info_path, "r", encoding="utf-8") as fp:
             manifest = json.load(fp)
@@ -113,6 +120,7 @@ class TerrainChunkLoader:
             combined_bm.free()
 
         full_obj = bpy.data.objects.new(TerrainDefaults.FULL_TERRAIN_OBJECT_NAME, full_mesh)
+        full_obj["tl1_mission_terrain_path"] = str(info_path)
         CollectionHelper.link_exclusively(full_obj, terrain_col)
         cls._style_and_lock_terrain_object(full_obj, terrain_mat)
         context.view_layer.update()

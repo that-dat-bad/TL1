@@ -23,6 +23,7 @@ from .constants import (
     WorkspaceDefaults,
     Zadanie00MarkerKinds,
 )
+from .properties import RepoPathResolver
 from .serializer import MissionSceneSerializer
 from .terrain_loader import TerrainChunkLoader
 
@@ -118,9 +119,10 @@ class LiveSyncServerManager:
                 self._cached_payload_bytes = self._build_empty_payload_bytes()
 
     def notify_manual_mission_loaded(self, scene: Scene) -> None:
-        """ユーザーがBlender上で手動でミッションを開いた際に同期基準を更新する"""
+        """ユーザーがBlender上で手動でミッションを開いた/保存した際に同期基準を更新する"""
         with self._lock:
-            self._last_synced_game_file = scene.mission_settings.mission_file_path
+            fp = scene.mission_settings.mission_file_path
+            self._last_synced_game_file = str(RepoPathResolver.resolve_path(scene, fp)) if fp else ""
         if self._running:
             self.push_now(scene, request_restart=False)
 
@@ -143,6 +145,11 @@ class LiveSyncServerManager:
                     q_params = parse_qs(parsed.query)
                     file_list = q_params.get(LiveSyncDefaults.QUERY_KEY_FILE, [""])
                     req_file = file_list[MathConstants.ZERO_INT].strip() if file_list else ""
+                    terrain_list = q_params.get("terrain", [""])
+                    req_terrain = terrain_list[MathConstants.ZERO_INT].strip() if terrain_list else ""
+                    if req_terrain:
+                        with manager_ref._lock:
+                            manager_ref._requested_terrain_path = req_terrain
                     body = manager_ref._on_client_poll_live(req_file)
                     self.send_response(LiveSyncDefaults.HTTP_OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -252,6 +259,8 @@ class LiveSyncServerManager:
             polls = self._client_poll_count
             req_file = self._requested_mission_file
             last_synced_file = self._last_synced_game_file
+            req_terrain = getattr(self, "_requested_terrain_path", "")
+            last_terrain = getattr(self, "_last_synced_terrain_path", "")
 
         has_entities = self.has_any_mission_entities(scene)
 
@@ -260,16 +269,24 @@ class LiveSyncServerManager:
             return LiveSyncDefaults.TIMER_INTERVAL_SEC
 
         # ゲームが起動・接続された瞬間 (polls > 0):
-        # シーンが空の場合、またはゲーム側で別ミッションに切り替わった場合に全地形＋ミッションを自動展開
+        # シーンが空の場合、またはゲーム側で別ミッション/別地形に切り替わった場合に全地形＋ミッションを自動展開
         if polls > MathConstants.ZERO_INT:
             needs_initial_load = not has_entities
+            try:
+                req_resolved = str(RepoPathResolver.resolve_path(scene, req_file)) if req_file else ""
+                last_resolved = str(RepoPathResolver.resolve_path(scene, last_synced_file)) if last_synced_file else ""
+                cur_resolved = str(RepoPathResolver.resolve_path(scene, scene.mission_settings.mission_file_path)) if scene.mission_settings.mission_file_path else ""
+            except Exception:
+                req_resolved, last_resolved, cur_resolved = req_file, last_synced_file, scene.mission_settings.mission_file_path
+
             needs_mission_switch = bool(
-                req_file
-                and req_file != last_synced_file
-                and req_file != scene.mission_settings.mission_file_path
+                req_resolved
+                and req_resolved != last_resolved
+                and req_resolved != cur_resolved
             )
-            if needs_initial_load or needs_mission_switch:
-                self._auto_load_mission_on_game_connect(scene, req_file)
+            needs_terrain_switch = bool(req_terrain and req_terrain != last_terrain)
+            if needs_initial_load or needs_mission_switch or needs_terrain_switch:
+                self._auto_load_mission_on_game_connect(scene, req_file, req_terrain)
                 return LiveSyncDefaults.TIMER_INTERVAL_SEC
 
         if not self.has_any_mission_entities(scene):
@@ -297,8 +314,8 @@ class LiveSyncServerManager:
 
         return LiveSyncDefaults.TIMER_INTERVAL_SEC
 
-    def _auto_load_mission_on_game_connect(self, scene: Scene, requested_file: str) -> None:
-        """ゲーム接続検知時に専用『ミッション編集』ワークスペースへ切り替え、全地形(100チャンク)とミッションJSONを自動展開する"""
+    def _auto_load_mission_on_game_connect(self, scene: Scene, requested_file: str, requested_terrain: str = "") -> None:
+        """ゲーム接続検知時に専用『ミッション編集』ワークスペースへ切り替え、ゲーム側と同一の地形とミッションJSONを自動展開する"""
         for default_name in TerrainDefaults.DEFAULT_STARTUP_OBJECTS:
             obj = bpy.data.objects.get(default_name)
             if obj is not None:
@@ -309,7 +326,10 @@ class LiveSyncServerManager:
 
         target_mission_path = requested_file if requested_file else PathConstants.MISSION_00_REL_PATH
         scene.mission_settings.terrain_load_mode = TerrainDefaults.MODE_ALL_CHUNKS
-        TerrainChunkLoader.load_chunks_for_mode(bpy.context)
+        TerrainChunkLoader.load_chunks_for_mode(bpy.context, terrain_info_path=(requested_terrain or None))
+        if requested_terrain:
+            with self._lock:
+                self._last_synced_terrain_path = requested_terrain
         MissionSceneSerializer.import_mission_json(bpy.context, target_mission_path)
 
         player_obj: Optional[Object] = None
@@ -325,7 +345,7 @@ class LiveSyncServerManager:
         sig = json.dumps(mission_dict, sort_keys=True, ensure_ascii=False)
 
         with self._lock:
-            self._last_synced_game_file = scene.mission_settings.mission_file_path
+            self._last_synced_game_file = str(RepoPathResolver.resolve_path(scene, target_mission_path))
             self._last_mission_signature = sig
 
         self._tag_redraw_all_windows()
@@ -369,19 +389,6 @@ class LiveSyncServerManager:
                     if hasattr(space, "shading"):
                         space.shading.type = "SOLID"
                         space.shading.color_type = "OBJECT"
-                    if focus_target is not None and space.region_3d is not None:
-                        space.region_3d.view_location = focus_target.location.copy()
-                        space.region_3d.view_distance = ViewportDefaults.INITIAL_VIEW_DISTANCE
-
-        view_layer = getattr(bpy.context, "view_layer", None)
-        if view_layer is not None and focus_target is not None:
-            view_layer.update()
-            for existing in list(view_layer.objects):
-                if existing is not None:
-                    existing.select_set(False)
-            if focus_target.name in view_layer.objects:
-                focus_target.select_set(True)
-                view_layer.objects.active = focus_target
 
     @staticmethod
     def _tag_redraw_all_windows() -> None:

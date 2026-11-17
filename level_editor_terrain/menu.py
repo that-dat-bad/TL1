@@ -1,6 +1,6 @@
 import bpy
 from .create_terrain import MYADDON_OT_create_terrain, MYADDON_OT_create_mountain_along_spline, MYADDON_OT_create_valley_along_spline
-from .ai_terrain import MYADDON_OT_ai_generate_terrain
+from .ai_terrain import MYADDON_OT_ai_generate_terrain, MYADDON_OT_rebuild_from_curves
 from .mcp_server import MYADDON_OT_start_mcp_server, MYADDON_OT_stop_mcp_server
 
 class TOPBAR_MT_terrain_menu(bpy.types.Menu):
@@ -16,6 +16,7 @@ class TOPBAR_MT_terrain_menu(bpy.types.Menu):
         self.layout.operator(MYADDON_OT_create_valley_along_spline.bl_idname, text=MYADDON_OT_create_valley_along_spline.bl_label)
         self.layout.separator()
         self.layout.operator(MYADDON_OT_ai_generate_terrain.bl_idname, text=MYADDON_OT_ai_generate_terrain.bl_label)
+        self.layout.operator(MYADDON_OT_rebuild_from_curves.bl_idname, text=MYADDON_OT_rebuild_from_curves.bl_label, icon='FILE_REFRESH')
         self.layout.separator()
         self.layout.separator()
         self.layout.label(text="MCP連携", icon='LINKED')

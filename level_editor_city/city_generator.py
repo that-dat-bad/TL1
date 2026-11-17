@@ -832,8 +832,8 @@ class ProceduralCityGenerator:
                     105.0 if is_full else 36.0,
                 )
             else:
-                # 郊外住宅・工業地区: 都市マスクに応じて自然にフェードアウト
-                fill_p = 0.72 if is_full else max(0.25, min(0.72, urban_score * 1.15))
+                # 郊外住宅・工業地区: 都市マスクに応じて 0 まで滑らかにフェードアウト（急激なゼロ落ち防止）
+                fill_p = 0.72 if is_full else min(0.75, max(0.03, (urban_score ** 1.35) * 1.15))
                 if rng.random() < (0.35 if is_full else 0.25):
                     # 工場・倉庫・大型商業棟: 幅 45m〜90m、奥行 30m〜60m、高さ 12m〜28m
                     return (
@@ -894,4 +894,105 @@ class ProceduralCityGenerator:
                         continue
                     _try_place_lot(wx, wy, bw, bd, bh, ang + rng.uniform(-0.04, 0.04), b_type)
 
+        # 2. 都市以外の幹線道路沿い集落・倉庫・前哨拠点（40km全域に点在）
+        if not is_full:
+            self._scatter_rural_and_roadside_lots(
+                building_lots,
+                rng,
+                _nearest_cbd_dist,
+                _try_place_lot,
+                min_city_dist=2600.0 * min(1.8, c_scale),
+            )
+
         return building_lots
+
+    def _scatter_rural_and_roadside_lots(
+        self,
+        building_lots,
+        rng,
+        nearest_cbd_dist_fn,
+        try_place_lot_fn,
+        min_city_dist=2600.0,
+    ):
+        """
+        都市圏の外側にある幹線道路沿いの小集落・倉庫群と、
+        広域マップ上の点在する農家・前哨小屋を生成する。
+        （急斜面への配置は spawn_buildings 側のレイキャストで自動除外される）
+        """
+        bound_x = max(1000.0, self.size_x * 0.44)
+        bound_y = max(1000.0, self.size_y * 0.44)
+
+        # A) 幹線道路沿いの集落・ドライブイン・倉庫クラスター
+        for i, spline in enumerate(self.generated_splines):
+            meta = self.spline_metadata[i] if i < len(self.spline_metadata) else {}
+            if not meta.get('is_main', False) or len(spline) < 6:
+                continue
+
+            acc_dist = 0.0
+            next_cluster_dist = rng.uniform(1400.0, 2600.0)
+            for j in range(1, len(spline)):
+                p0 = spline[j - 1]
+                p1 = spline[j]
+                dx = p1[0] - p0[0]
+                dy = p1[1] - p0[1]
+                seg = math.hypot(dx, dy)
+                if seg < 1.0:
+                    continue
+                acc_dist += seg
+                if acc_dist < next_cluster_dist:
+                    continue
+                acc_dist = 0.0
+                next_cluster_dist = rng.uniform(1600.0, 3200.0)
+
+                if nearest_cbd_dist_fn(p1[0], p1[1]) < min_city_dist:
+                    continue
+                if abs(p1[0]) > bound_x or abs(p1[1]) > bound_y:
+                    continue
+
+                ang = math.atan2(dy, dx)
+                nx = -dy / seg
+                ny = dx / seg
+                cluster_n = rng.randint(3, 8)
+                for _ in range(cluster_n):
+                    side = 1.0 if rng.random() < 0.5 else -1.0
+                    along_off = rng.uniform(-140.0, 140.0)
+                    perp_off = side * rng.uniform(32.0, 120.0)
+                    lx = p1[0] + math.cos(ang) * along_off + nx * perp_off
+                    ly = p1[1] + math.sin(ang) * along_off + ny * perp_off
+                    is_warehouse = rng.random() < 0.30
+                    bw = rng.uniform(26.0, 52.0) if is_warehouse else rng.uniform(12.0, 22.0)
+                    bd = rng.uniform(18.0, 36.0) if is_warehouse else rng.uniform(10.0, 20.0)
+                    bh = rng.uniform(9.0, 16.0) if is_warehouse else rng.uniform(6.0, 12.0)
+                    try_place_lot_fn(lx, ly, bw, bd, bh, ang + rng.uniform(-0.15, 0.15), 'LOWRISE')
+
+        # C) 都市外縁のフェザーリング（街区グリッドの外側に疎らな郊外住宅を散らす）
+        for _ in range(90):
+            ang = rng.uniform(0.0, math.pi * 2.0)
+            r_dist = rng.uniform(min_city_dist * 0.72, min_city_dist * 1.65)
+            lx = self.cbd_center[0] + math.cos(ang) * r_dist
+            ly = self.cbd_center[1] + math.sin(ang) * r_dist
+            if abs(lx) > bound_x or abs(ly) > bound_y:
+                continue
+            # 外側ほど確率を下げる
+            t_edge = (r_dist - min_city_dist * 0.72) / max(min_city_dist * 0.93, 1.0)
+            if rng.random() > max(0.10, 1.0 - t_edge * 0.85):
+                continue
+            bw = rng.uniform(12.0, 24.0)
+            bd = rng.uniform(10.0, 22.0)
+            bh = rng.uniform(6.0, 13.0)
+            try_place_lot_fn(lx, ly, bw, bd, bh, ang + rng.uniform(-0.3, 0.3), 'LOWRISE')
+
+        # B) 郊外・遠隔地の散在集落（小規模クラスター × 24箇所）
+        for _ in range(24):
+            cx = rng.uniform(-bound_x, bound_x)
+            cy = rng.uniform(-bound_y, bound_y)
+            if nearest_cbd_dist_fn(cx, cy) < min_city_dist * 1.1:
+                continue
+            n_houses = rng.randint(2, 5)
+            for _ in range(n_houses):
+                lx = cx + rng.uniform(-160.0, 160.0)
+                ly = cy + rng.uniform(-160.0, 160.0)
+                bw = rng.uniform(12.0, 24.0)
+                bd = rng.uniform(10.0, 20.0)
+                bh = rng.uniform(6.0, 12.0)
+                try_place_lot_fn(lx, ly, bw, bd, bh, rng.uniform(0.0, math.pi), 'LOWRISE')

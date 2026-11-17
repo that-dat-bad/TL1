@@ -380,7 +380,7 @@ class MYADDON_OT_ExportMissionJson(Operator):
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
         if LiveSyncServerManager.instance().is_running:
-            LiveSyncServerManager.instance().push_now(context.scene, request_restart=False)
+            LiveSyncServerManager.instance().notify_manual_mission_loaded(context.scene)
         self.report({"INFO"}, msg)
         return {"FINISHED"}
 

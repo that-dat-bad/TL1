@@ -10,12 +10,16 @@ try:
     from .terrain_materials import detect_biomes, detect_biome, apply_biome_material_to_terrain, detect_road_type, get_or_create_road_material
     from .terrain_blueprint import compile_blueprint, route_road_around_mountains, smooth_and_resample_road
     from .gn_utils import set_modifier_input
+    from .blueprint_store import load_blueprint
+    from .terrain_pipeline import execute_blueprint_pipeline
 except ImportError:
     import sys
     sys.path.append(os.path.dirname(__file__))
     from terrain_materials import detect_biomes, detect_biome, apply_biome_material_to_terrain, detect_road_type, get_or_create_road_material
     from terrain_blueprint import compile_blueprint, route_road_around_mountains, smooth_and_resample_road
     from gn_utils import set_modifier_input
+    from blueprint_store import load_blueprint
+    from terrain_pipeline import execute_blueprint_pipeline
 
 try:
     from level_editor_city.create_road import setup_mixed_road_geometry_nodes, setup_road_geometry_nodes
@@ -166,11 +170,38 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         max=999999
     ) # type: ignore
 
+    edit_mode: bpy.props.EnumProperty(
+        name="生成モード",
+        description="新規に地形を作成するか、現在のブループリントを部分修正するかを選択",
+        items=[
+            ('NEW', "新規生成", "現在の地形を置き換えて新しく生成します"),
+            ('PATCH', "現在の地形を部分修正", "現在のブループリントを保持したまま差分パッチで部分修正します"),
+        ],
+        default='NEW'
+    ) # type: ignore
+
+    heightmap_resolution: bpy.props.EnumProperty(
+        name="ハイトマップ解像度",
+        description="NumPyハイトマップ＆侵食シミュレーションの解像度",
+        items=[
+            ('1024', "1024×1024 (標準・高速)", "約1〜2秒で生成・侵食・ベイク完了"),
+            ('2048', "2048×2048 (高精細)", "40kmで約19.5m間隔の高精細ハイトマップ"),
+        ],
+        default='1024'
+    ) # type: ignore
+
+    use_heightmap_engine: bpy.props.BoolProperty(
+        name="ハイトマップ＋侵食エンジンを使用",
+        description="NumPyによる水食・熱侵食とAlbedo/Normal/Splatマップベイクを有効にします",
+        default=True
+    ) # type: ignore
+
     _timer = None
     _thread = None
     _result = None
     _error = None
     _active_seed = 0
+    _current_blueprint = None
 
     def invoke(self, context, event):
         global _cached_models
@@ -212,6 +243,10 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         row.prop(self, "terrain_scale", text="")
         row.prop(self, "preset", text="")
         row.prop(self, "biome", text="")
+        row2 = layout.row(align=True)
+        row2.prop(self, "edit_mode", text="")
+        row2.prop(self, "heightmap_resolution", text="")
+        layout.prop(self, "use_heightmap_engine")
         layout.prop(self, "seed")
         layout.prop(self, "prompt", text="指示")
         layout.label(text="※ バックグラウンドで処理され、完了時に地形・マテリアルが生成されます。", icon='INFO')
@@ -222,6 +257,16 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         self._result = None
         self._error = None
         self._active_seed = self.seed if self.seed > 0 else (int(time.time() * 1000) % 1000000 or 1)
+        self._current_blueprint = None
+
+        if self.edit_mode == 'PATCH':
+            bp, meta = load_blueprint(context.scene)
+            if not bp:
+                self.report({'WARNING'}, "既存のブループリントが見つからないため新規生成として実行します")
+            else:
+                self._current_blueprint = bp
+                if self.seed == 0 and meta.get("seed"):
+                    self._active_seed = int(meta["seed"])
 
         # 設定の保存
         save_ai_config("ai_provider", self.ai_provider)
@@ -236,12 +281,12 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             save_ai_config("gemini_model", self.gemini_model)
             self._thread = threading.Thread(
                 target=self.run_gemini_request,
-                args=(self.gemini_model, key, self.prompt, self.preset, self.terrain_scale)
+                args=(self.gemini_model, key, self.prompt, self.preset, self.terrain_scale, self._current_blueprint)
             )
         else:
             self._thread = threading.Thread(
                 target=self.run_ollama_request,
-                args=(self.model_name, self.prompt, self.preset, self.terrain_scale)
+                args=(self.model_name, self.prompt, self.preset, self.terrain_scale, self._current_blueprint)
             )
 
         self._thread.start()
@@ -262,6 +307,34 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                     return {'CANCELLED'}
                     
                 if self._result:
+                    if self.use_heightmap_engine:
+                        final_bp, hm_meta, tex_paths = execute_blueprint_pipeline(
+                            context,
+                            self._result,
+                            preset=self.preset,
+                            terrain_scale=self.terrain_scale,
+                            biome=self.biome,
+                            prompt=self.prompt,
+                            seed=getattr(self, '_active_seed', 1),
+                            resolution=int(self.heightmap_resolution),
+                            is_patch=(self._current_blueprint is not None),
+                            operator=self,
+                        )
+                        try:
+                            for area in context.screen.areas:
+                                if area.type == 'VIEW_3D':
+                                    for space in area.spaces:
+                                        if space.type == 'VIEW_3D':
+                                            space.shading.type = 'MATERIAL'
+                        except Exception:
+                            pass
+                        stats = hm_meta.get("stats", {})
+                        self.report(
+                            {'INFO'},
+                            f"AIハイトマップ地形生成完了 ({hm_meta.get('resolution')}px / 標高 {stats.get('min_height')}m〜{stats.get('max_height')}m)",
+                        )
+                        return {'FINISHED'}
+
                     compiled = compile_blueprint(
                         self._result,
                         preset=self.preset,
@@ -1441,7 +1514,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             obj_tun.data.materials.append(mat_tun)
         bm_tun.free()
 
-    def run_gemini_request(self, model_name, api_key, prompt, preset='AUTO', terrain_scale='40KM'):
+    def run_gemini_request(self, model_name, api_key, prompt, preset='AUTO', terrain_scale='40KM', current_blueprint=None):
         is_40km = (terrain_scale == '40KM')
         scale_str = "40km四方 (40,000m × 40,000m)" if is_40km else "20km四方 (20,000m × 20,000m)"
 
@@ -1452,10 +1525,32 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
             preset_hint = "\n【ユーザー指定: 丘陵プリセット】relief_level は 2〜3 程度にしてください。"
         elif preset == 'MOUNTAINS':
             preset_hint = "\n【ユーザー指定: 山岳プリセット】relief_level は 4〜5、ridge_sharpness は 0.65〜0.95 にしてください。"
-            
-        user_content = prompt + preset_hint
+
+        if current_blueprint is not None:
+            bp_str = json.dumps(current_blueprint, ensure_ascii=False)
+            user_content = f"【現在のブループリント】\n{bp_str}\n\n【修正指示】\n{prompt}{preset_hint}"
+        else:
+            user_content = prompt + preset_hint
         
-        system_instruction = textwrap.dedent(f"""\
+        if current_blueprint is not None:
+            system_instruction = textwrap.dedent(f"""\
+                あなたはBlenderの3D地形・都市設計AIアーキテクトです。
+                全体サイズは{scale_str}です。
+                ユーザーから提示された【現在のブループリント】に対し、【修正指示】を満たすための「差分パッチJSON」のみを出力してください。
+                関係ない既存ゾーンは変更しないでください。
+
+                [出力JSON仕様]
+                {{
+                  "operations": [
+                    {{"op": "update_params", "params": {{"relief_level": 4.2, "ridge_sharpness": 0.8}}}},
+                    {{"op": "add_zone", "zone": {{"type": "MOUNTAIN_RANGE", "region": "NORTH_EAST", "height_scale": 1.6, "width_scale": 1.2}}}},
+                    {{"op": "modify_zone", "match": {{"id": "<既存zoneのid>"}}, "updates": {{"height_scale": 1.8}}}},
+                    {{"op": "remove_zone", "match": {{"id": "<既存zoneのid>"}}}}
+                  ]
+                }}
+            """)
+        else:
+            system_instruction = textwrap.dedent(f"""\
             あなたはBlenderの3D地形・都市設計AIアーキテクトです。
             全体サイズは{scale_str}のオープンワールド規模です。
             生の3D座標配列は出力せず、地形の「意味・構図ベースの設計仕様（ブループリントJSON）」のみを出力してください。
@@ -1475,6 +1570,8 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
               * 都市: {{"type": "CITY", "region": "<地域>", "scale": 0.6〜8.0（全域都市・すべて街の場合は 8.0, region: "CENTER"）}}
               * 山脈: {{"type": "MOUNTAIN_RANGE", "region": "<地域>", "height_scale": 0.5〜2.2, "width_scale": 0.5〜2.0}}
               * 谷/峡谷: {{"type": "VALLEY", "region": "<地域>", "depth_scale": 0.5〜2.2, "width_scale": 0.5〜2.0}}
+              * 川: {{"type": "RIVER", "region": "<地域>", "width_scale": 0.5〜2.5, "depth_scale": 0.5〜2.0}}
+              * 海・海岸線: {{"type": "COASTLINE", "region": "NORTH"|"SOUTH"|"EAST"|"WEST", "depth_scale": 0.8〜1.5}}
               <地域>の選択肢: "CENTER", "NORTH", "SOUTH", "EAST", "WEST", "NORTH_EAST", "NORTH_WEST", "SOUTH_EAST", "SOUTH_WEST",
               "PERIMETER", "NORTH_TO_SOUTH", "EAST_TO_WEST", "SOUTH_TO_CENTER", "NORTH_TO_CENTER", "EAST_TO_CENTER", "WEST_TO_CENTER", "NW_TO_SE", "NE_TO_SW"
               ※ ユーザーが街や都市を求めていない純粋な自然地形の場合は CITY ゾーンを入れないでください。
@@ -1594,7 +1691,7 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
                 self._error = f"エラーが発生しました: {e}"
                 return
 
-    def run_ollama_request(self, model_name, prompt, preset='AUTO', terrain_scale='40KM'):
+    def run_ollama_request(self, model_name, prompt, preset='AUTO', terrain_scale='40KM', current_blueprint=None):
         is_40km = (terrain_scale == '40KM')
         scale_str = "40km x 40km (40,000m x 40,000m)" if is_40km else "20km x 20km (20,000m x 20,000m)"
         coord_min = -20000 if is_40km else -10000
@@ -1636,8 +1733,25 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         elif preset == 'MOUNTAINS':
             prompt += "\n[Requirement: MOUNTAINS preset. Use relief_level 4 to 5 and ridge_sharpness 0.7 to 0.95.]"
         
-        system_prompt = textwrap.dedent(f"""\
-            You are a 3D terrain and level-design architect for Blender ({scale_str} open-world scale).
+        if current_blueprint is not None:
+            bp_str = json.dumps(current_blueprint, ensure_ascii=False)
+            prompt = f"Current Blueprint:\n{bp_str}\n\nEdit Request:\n{prompt}"
+            system_prompt = textwrap.dedent(f"""\
+                You are a 3D terrain architect ({scale_str}).
+                Output ONLY a valid JSON diff patch with "operations" to modify the Current Blueprint according to the Edit Request.
+                Format:
+                {{
+                  "operations": [
+                    {{"op": "update_params", "params": {{"relief_level": 4.2, "ridge_sharpness": 0.8}}}},
+                    {{"op": "add_zone", "zone": {{"type": "MOUNTAIN_RANGE", "region": "NORTH_EAST", "height_scale": 1.6, "width_scale": 1.2}}}},
+                    {{"op": "modify_zone", "match": {{"id": "<zone_id>"}}, "updates": {{"height_scale": 1.8}}}},
+                    {{"op": "remove_zone", "match": {{"id": "<zone_id>"}}}}
+                  ]
+                }}
+            """)
+        else:
+            system_prompt = textwrap.dedent(f"""\
+                You are a 3D terrain and level-design architect for Blender ({scale_str} open-world scale).
             Do NOT output raw 3D coordinate arrays. Instead, output ONLY a semantic terrain blueprint JSON that describes the composition and parameters.
             A spatial compiler will generate curved splines and Geometry Nodes parameters from your blueprint.
 
@@ -2006,3 +2120,41 @@ class MYADDON_OT_ai_generate_terrain(bpy.types.Operator):
         objs_to_remove = [obj for obj in collection.objects if "_AI" in obj.name]
         for obj in objs_to_remove:
             bpy.data.objects.remove(obj, do_unlink=True)
+
+
+class MYADDON_OT_rebuild_from_curves(bpy.types.Operator):
+    bl_idname = "myaddon.myaddon_ot_rebuild_from_curves"
+    bl_label = "カーブ変更を地形に反映"
+    bl_description = "Mountains / Valleys / Roads コレクションの手動編集をハイトマップ・侵食・テクスチャへ再反映します"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        try:
+            from .terrain_pipeline import rebuild_heightmap_from_scene_curves
+        except ImportError:
+            from terrain_pipeline import rebuild_heightmap_from_scene_curves
+
+        try:
+            hm_meta, _ = rebuild_heightmap_from_scene_curves(context)
+            stats = hm_meta.get("stats", {})
+            self.report(
+                {'INFO'},
+                f"カーブ変更を反映しました ({stats.get('generation_seconds')}s / 標高 {stats.get('min_height')}m〜{stats.get('max_height')}m)",
+            )
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"再反映に失敗しました: {e}")
+            return {'CANCELLED'}
+
+
+class VIEW3D_PT_tl1_terrain_sync(bpy.types.Panel):
+    bl_label = "TL1 AI地形ツール"
+    bl_idname = "VIEW3D_PT_tl1_terrain_sync"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'TL1 Terrain'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator(MYADDON_OT_ai_generate_terrain.bl_idname, text="AI地形生成 / 部分修正", icon='SHADERFX')
+        layout.operator(MYADDON_OT_rebuild_from_curves.bl_idname, text="カーブ変更を地形に反映", icon='FILE_REFRESH')

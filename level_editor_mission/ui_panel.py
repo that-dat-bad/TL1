@@ -457,6 +457,8 @@ def _draw_mission_control_body(layout: UILayout, context: Context) -> None:
     row_id.prop(settings, "alias_name", text="Alias")
     io_box.prop(settings, "mission_name")
     io_box.prop(settings, "sub_title")
+    io_box.prop(settings, "area_name", text="作戦空域")
+    io_box.prop(settings, "description", text="状況・指令文")
     row_meta = io_box.row(align=True)
     row_meta.prop(settings, "difficulty")
     row_meta.prop(settings, "player_hp")
